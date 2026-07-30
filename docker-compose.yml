@@ -1,0 +1,84 @@
+services:
+  # ── Servicio 1: Base de datos PostgreSQL ──────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: apagos_db
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-tesoreria}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-tesoreria}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Servicio 2: API Backend (Express + Node.js) ───────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apagos_api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Las variables de BD ahora se toman exclusivamente del .env
+      # DB_HOST: db
+      # DB_PORT: 5433
+      PORT: 3000
+      # El frontend corre en el puerto 80 del contenedor "frontend"
+      # En producción Docker, el cliente accede por localhost:80 → nginx → /api/ → api:3000
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      EXPEDIENTES_PATH: /mnt/nas_pagos/CWM
+      NAS_PAYMENTS_PATH: /mnt/nas_bancos/CWM
+    volumes:
+      # Montar carpeta de credenciales FIEL (certificados .cer y .key)
+      - ./credenciales:/usr/src/app/credenciales:ro
+      # Carpetas temporales de descarga del SAT
+      - apagos_temp_uploads:/usr/src/app/temp_uploads
+      - apagos_temp_paquetes:/usr/src/app/temp_paquetes
+      # Montaje directo del NAS para expedientes
+      - nas_pagos:/mnt/nas_pagos
+      - nas_bancos:/mnt/nas_bancos
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ── Servicio 3: Dashboard React (Nginx) ───────────────────────────────────
+  frontend:
+    build:
+      context: ./dashboard-cwm
+      dockerfile: Dockerfile
+      args:
+        # Cuando Nginx hace proxy reverso, el frontend llama a /api/ (relativo)
+        # Así no hay problemas de CORS ni URLs hardcodeadas
+        VITE_API_URL: ""
+    container_name: apagos_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  apagos_temp_uploads:
+  apagos_temp_paquetes:
+  nas_pagos:
+    driver_opts:
+      type: cifs
+      o: username=${NAS_USER},password=${NAS_PASSWORD},vers=3.0
+      device: //192.168.1.15/pagos
+  nas_bancos:
+    driver_opts:
+      type: cifs
+      o: username=${NAS_USER},password=${NAS_PASSWORD},vers=3.0
+      device: //192.168.1.15/bancos

@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.env
+*.md
+.git
+.gitignore
+temp_uploads/*
+temp_paquetes/*
+tests
+jest.config.js

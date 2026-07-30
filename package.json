@@ -1,0 +1,46 @@
+{
+  "name": "apagos",
+  "version": "1.0.0",
+  "description": "Motor de descarga masiva SAT y conciliacion de pagos",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node api_server.js",
+    "scan": "node synology_scanner.js",
+    "update-folios": "node update_folios.js",
+    "verify-sat": "node verify.js",
+    "conciliar-xml": "node conciliar_complementos.js",
+    "setup-contabilidad": "node setup_contabilidad.js",
+    "importar-cuentas": "node importar_cuentas.js",
+    "importar-historicos": "node importar_historicos.js",
+    "setup-efos": "node setup_efos.js",
+    "setup-candado": "node setup_candado_iva.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@nodecfdi/credentials": "^3.2.0",
+    "@nodecfdi/rfc": "^2.0.6",
+    "@nodecfdi/sat-ws-descarga-masiva": "^2.0.0",
+    "adm-zip": "^0.5.17",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^7.5.1",
+    "fast-xml-parser": "^5.10.1",
+    "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.21.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.4"
+  }
+}

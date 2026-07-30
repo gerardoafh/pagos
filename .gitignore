@@ -1,0 +1,44 @@
+# =====================================================
+# SEGURIDAD — Nunca subir credenciales ni secretos
+# =====================================================
+.env
+.env.*
+!.env.example
+
+# Certificados FIEL (SAT) — datos sensibles
+credenciales/
+
+# =====================================================
+# DEPENDENCIAS NODE
+# =====================================================
+node_modules/
+dashboard-cwm/node_modules/
+
+# =====================================================
+# ARCHIVOS DE BUILD / DIST
+# =====================================================
+dashboard-cwm/dist/
+dashboard-cwm/.vite/
+
+# =====================================================
+# ARCHIVOS TEMPORALES DEL SISTEMA
+# =====================================================
+temp_uploads/
+temp_paquetes/
+
+# Archivos de sistema Windows/macOS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# =====================================================
+# LOGS Y ARCHIVOS GENERADOS EN RUNTIME
+# =====================================================
+*.log
+last_request.txt
+
+# =====================================================
+# ARCHIVOS DE DATOS SENSIBLES
+# =====================================================
+*.xlsx
+cuentas.csv
