@@ -1,0 +1,15 @@
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Instalar dependencias del sistema requeridas para pdf-parse, OCR y synology_scanner
+RUN apk add --no-cache tzdata poppler-utils graphicsmagick
+ENV TZ=America/Mexico_City
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+# Comando para levantar el worker
+CMD ["node", "worker.js"]

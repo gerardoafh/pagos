@@ -56,7 +56,7 @@ export async function ejecutarConciliacion(monto, conceptoBanco, idTransaccionBa
 
     await db.query(
       `UPDATE facturas_recibidas 
-       SET estatus_pago = 'pagado', id_transaccion_banco = $1 
+       SET estatus_pago = 'pagado', id_transaccion_banco = $1, fecha_pago = CURRENT_TIMESTAMP
        WHERE uuid = $2`,
       [idTransaccionBanco, facturaSeleccionada.uuid]
     );

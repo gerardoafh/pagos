@@ -259,6 +259,9 @@ export function registerComprasEndpoints(app, db, authenticateToken) {
 
       const result = await db.query(`
         SELECT
+          MAX(f.rfc_emisor) as rfc_emisor,
+          MAX(f.regimen_fiscal_emisor) as regimen_fiscal_emisor,
+          MAX(f.cp_emisor) as cp_emisor,
           MAX(fc.descripcion) as descripcion,
           fc.clave_prod_serv,
           SUM(fc.cantidad) as cantidad_total,

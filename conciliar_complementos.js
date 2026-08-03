@@ -58,7 +58,7 @@ async function procesarComplementos() {
         
         while ((coincidencia = regex.exec(contenido)) !== null) {
           const uuidPadre = coincidencia[1].toLowerCase();
-          const resultado = await db.query(`UPDATE facturas_recibidas SET estatus_pago = 'pagado', tiene_complemento = true WHERE uuid = $1 AND estatus_pago = 'pendiente'`, [uuidPadre]);
+          const resultado = await db.query(`UPDATE facturas_recibidas SET estatus_pago = 'pagado', tiene_complemento = true, fecha_pago = CURRENT_TIMESTAMP WHERE uuid = $1 AND estatus_pago = 'pendiente'`, [uuidPadre]);
           
           if (resultado.rowCount > 0) {
             console.log(`   ✅ Factura ${uuidPadre} conciliada gracias al Complemento: ${path.basename(rutaArchivo)}`);

@@ -164,34 +164,61 @@ async function escanearSynology() {
         }
       }
 
-      // 1.1: Match Estricto (RFC + Monto en texto interno o título)
+      // 1.1: Match Avanzado Múltiple (RFC, Monto, Folio Interno, UUID)
+      let facturasMultiMatch = [];
+      
       for (const factura of facturasPendientes) {
         const rfcLower = factura.rfc_emisor.toLowerCase();
         const montoExacto = factura.total.toString();
         const montoFixed = parseFloat(factura.total).toFixed(2);
-
+        
+        // Limpiar el folio de letras para buscar solo los números (ej. F38258 -> 38258)
+        let folioLimpio = '';
+        if (factura.folio_interno) {
+          folioLimpio = factura.folio_interno.toString().replace(/[^0-9]/g, '');
+        }
+        const folioValido = folioLimpio.length >= 2;
+        
+        const uuidChunk = factura.uuid.split('-')[0].toLowerCase();
+        const keywords = obtenerKeywordsProveedor(factura.nombre_emisor);
+        
         const coincideRFC = (textoPDFLocal && textoPDFLocal.includes(rfcLower)) || nombreArchivoLower.includes(rfcLower);
         const coincideMonto = (textoPDFLocal && (textoPDFLocal.includes(montoExacto) || textoPDFLocal.includes(montoFixed))) || 
                               nombreArchivoLower.includes(montoExacto) || nombreArchivoLower.includes(montoFixed);
+                              
+        const coincideFolio = folioValido && (textoPDFLocal && textoPDFLocal.includes(folioLimpio));
+        const coincideUUID = (textoPDFLocal && textoPDFLocal.includes(uuidChunk));
+        const coincideKeyword = keywords.length > 0 && keywords.some(keyword => 
+                                 (textoPDFLocal && textoPDFLocal.includes(keyword)) || nombreArchivoLower.includes(keyword));
 
-        if (coincideRFC && coincideMonto) {
-          facturaMatch = factura;
-          console.log(`      ✅ Match local exitoso por datos duros.`);
-          break;
+        // Reglas de coincidencia segura:
+        // A) Exacto (Pago único 1 a 1)
+        const matchSeguro1a1 = coincideRFC && coincideMonto;
+        
+        // B) Pagos Múltiples (Nombre de Proveedor + Folio Interno) - Lógica de comprobantes BBVA
+        const matchMultiple = coincideKeyword && coincideFolio;
+        
+        // C) Match Infalible (El PDF contiene el UUID de la factura)
+        const matchUUID = coincideUUID;
+
+        if (matchSeguro1a1 || matchMultiple || matchUUID) {
+          facturasMultiMatch.push(factura);
+          console.log(`      ✅ Match local exitoso: Factura ${factura.uuid} (Proveedor: ${factura.nombre_emisor}, Folio: ${factura.folio_interno})`);
         }
       }
 
       // 1.2: Match por Palabras Clave del Emisor + Criterio Contable FIFO (Saldos vencidos antiguos primero)
-      if (!facturaMatch) {
+      // Solo lo ejecutamos si no hubo ningún match seguro
+      if (facturasMultiMatch.length === 0) {
         const facturasFIFO = [...facturasPendientes].sort((a, b) => new Date(a.fecha_emision) - new Date(b.fecha_emision));
         for (const factura of facturasFIFO) {
           const keywords = obtenerKeywordsProveedor(factura.nombre_emisor);
           const coincideKeyword = keywords.length > 0 && keywords.some(keyword => nombreArchivoLower.includes(keyword));
 
           if (coincideKeyword) {
-            facturaMatch = factura;
+            facturasMultiMatch.push(factura);
             console.log(`      ✅ Match local exitoso vía palabras clave comerciales (FIFO).`);
-            break;
+            break; // FIFO sí se rompe a la primera porque es un "Best Effort"
           }
         }
       }
@@ -199,7 +226,7 @@ async function escanearSynology() {
       // ==========================================================
       // 🤖 ETAPA 2: RECURSO DE EMERGENCIA CON OLLAMA (Servidor Linux)
       // ==========================================================
-      if (!facturaMatch) {
+      if (facturasMultiMatch.length === 0) {
         console.log(`      ❌ La Etapa 1 local no arrojó resultados concluyentes.`);
         const archivoBuffer = readFileSync(origenArchivo);
         const base64Data = archivoBuffer.toString('base64');
@@ -212,8 +239,8 @@ async function escanearSynology() {
             const montoExacto = factura.total.toString();
 
             if (respuestaIA.includes(rfcLower) && respuestaIA.includes(montoExacto)) {
-              facturaMatch = factura;
-              console.log(`      🎯 ¡Rescate exitoso desde Ollama Server!`);
+              facturasMultiMatch.push(factura);
+              console.log(`      🎯 ¡Rescate exitoso desde Ollama Server para factura ${factura.uuid}!`);
               break;
             }
           }
@@ -223,37 +250,45 @@ async function escanearSynology() {
       // ==========================================================
       // 📂 MOVIMIENTO OPERATIVO Y ACTUALIZACIÓN EN POSTGRES
       // ==========================================================
-      if (facturaMatch) {
-        console.log(`   🎯 EXPEDIENTE ENLAZADO -> Proveedor: ${facturaMatch.nombre_emisor} | Total: $${facturaMatch.total}`);
+      if (facturasMultiMatch.length > 0) {
+        for (const facturaMatch of facturasMultiMatch) {
+          console.log(`   🎯 EXPEDIENTE ENLAZADO -> Proveedor: ${facturaMatch.nombre_emisor} | Folio: ${facturaMatch.folio_interno} | Total: $${facturaMatch.total}`);
 
-        // Usamos la carpeta generada por el SAT si existe, sino la creamos
-        let carpetaDossier = facturaMatch.url_expediente;
-        
-        if (!carpetaDossier) {
-          const fecha = new Date(facturaMatch.fecha_emision);
-          const anio = fecha.getFullYear().toString();
-          const mes = String(fecha.getMonth() + 1).padStart(2, '0');
-          carpetaDossier = path.join(rutaNasDestino, anio, mes, facturaMatch.rfc_emisor, facturaMatch.uuid);
+          // Usamos la carpeta generada por el SAT si existe, sino la creamos
+          let carpetaDossier = facturaMatch.url_expediente;
+          
+          if (!carpetaDossier) {
+            const fecha = new Date(facturaMatch.fecha_emision);
+            const anio = fecha.getFullYear().toString();
+            const mes = String(fecha.getMonth() + 1).padStart(2, '0');
+            carpetaDossier = path.join(rutaNasDestino, anio, mes, facturaMatch.rfc_emisor, facturaMatch.uuid);
+          }
+
+          if (!existsSync(carpetaDossier)) {
+            mkdirSync(carpetaDossier, { recursive: true });
+          }
+
+          // Para evitar colisión si el mismo archivo se copia múltiples veces a la misma carpeta (raro, pero posible)
+          const destinoArchivo = path.join(carpetaDossier, `Pago_Validado_${archivo}`);
+          try {
+            copyFileSync(origenArchivo, destinoArchivo);
+            console.log(`   📂 Archivo movido al dossier unificado en red (Factura ${facturaMatch.uuid}).`);
+          } catch (copyErr) {
+             console.error(`   ⚠️ No se pudo copiar archivo al dossier ${carpetaDossier}`, copyErr);
+          }
+
+          await db.query(
+            `UPDATE facturas_recibidas 
+             SET estatus_pago = 'pagado', url_expediente = $1, fecha_pago = CURRENT_TIMESTAMP
+             WHERE uuid = $2`,
+            [carpetaDossier, facturaMatch.uuid]
+          );
+
+          console.log(`   ✅ Base de datos actualizada a estatus 'pagado' para ${facturaMatch.uuid}.`);
+          const idx = facturasPendientes.findIndex(f => f.uuid === facturaMatch.uuid);
+          if (idx !== -1) facturasPendientes.splice(idx, 1);
+          conciliados++;
         }
-
-        if (!existsSync(carpetaDossier)) {
-          mkdirSync(carpetaDossier, { recursive: true });
-        }
-
-        const destinoArchivo = path.join(carpetaDossier, `Pago_Validado_${archivo}`);
-        copyFileSync(origenArchivo, destinoArchivo);
-        console.log(`   📂 Archivo movido al dossier unificado en red.`);
-
-        await db.query(
-          `UPDATE facturas_recibidas 
-           SET estatus_pago = 'pagado', url_expediente = $1 
-           WHERE uuid = $2`,
-          [carpetaDossier, facturaMatch.uuid]
-        );
-
-        console.log(`   ✅ Base de datos actualizada a estatus 'pagado'.`);
-        facturasPendientes.splice(facturasPendientes.indexOf(facturaMatch), 1);
-        conciliados++;
       } else {
         console.log(`   ❌ Archivo omitido: Imposible conciliar por ninguna de las dos etapas.`);
       }

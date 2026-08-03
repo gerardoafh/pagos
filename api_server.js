@@ -7,7 +7,6 @@ import multer from 'multer';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import cron from 'node-cron'; // <-- Motor de tareas programadas
 import rateLimit from 'express-rate-limit'; // <-- Seguridad Rate Limiting
 import jwt from 'jsonwebtoken'; // <-- Tokens JWT
 import bcrypt from 'bcrypt'; // <-- Hashing seguro de contraseñas
@@ -33,6 +32,9 @@ const io = new Server(server, {
     methods: ['GET', 'POST']
   }
 });
+
+// Inyectar io en la app para usarlo en endpoints y middlewares
+app.set('io', io);
 
 // 🛡️ Configuración segura de CORS
 const corsOptions = {
@@ -70,12 +72,30 @@ db.query('SELECT NOW()')
 // ==========================================================
 async function autoSetup() {
   try {
-    // 1. Tabla principal de facturas
+    // 1. Tabla de Empresas (Multi-Tenant)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS empresas (
+        id SERIAL PRIMARY KEY,
+        rfc VARCHAR(13) UNIQUE NOT NULL,
+        razon_social VARCHAR(255) NOT NULL,
+        activa BOOLEAN DEFAULT TRUE,
+        creada_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Insertar la empresa principal por defecto si no existe
+      INSERT INTO empresas (rfc, razon_social) 
+      VALUES ('CWM020627SJ7', 'CHEONG WOON MEXICO SA DE CV')
+      ON CONFLICT (rfc) DO NOTHING;
+    `);
+
+    // 2. Tabla principal de facturas
     await db.query(`
       CREATE TABLE IF NOT EXISTS facturas_recibidas (
         uuid UUID PRIMARY KEY,
         rfc_emisor VARCHAR(13),
         nombre_emisor VARCHAR(255),
+        regimen_fiscal_emisor VARCHAR(10),
+        cp_emisor VARCHAR(10),
         fecha_emision TIMESTAMP WITH TIME ZONE,
         total DECIMAL(18, 2),
         subtotal DECIMAL(18, 2),
@@ -96,9 +116,38 @@ async function autoSetup() {
         moneda VARCHAR(10) DEFAULT 'MXN',
         tipo_cambio DECIMAL(10, 4) DEFAULT 1,
         id_transaccion_banco VARCHAR(100),
+        fecha_pago TIMESTAMP WITH TIME ZONE,
         importado_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        rfc_receptor VARCHAR(13)
+        rfc_receptor VARCHAR(13) REFERENCES empresas(rfc)
       );
+    `);
+
+    // Migración para bases de datos existentes
+    await db.query(`
+      ALTER TABLE facturas_recibidas 
+      ADD COLUMN IF NOT EXISTS rfc_receptor VARCHAR(13),
+      ADD COLUMN IF NOT EXISTS aprobado BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS alerta_efos BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS tiene_complemento BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS moneda VARCHAR(10) DEFAULT 'MXN',
+      ADD COLUMN IF NOT EXISTS tipo_cambio DECIMAL(10, 4) DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS id_transaccion_banco VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS importado_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS regimen_fiscal_emisor VARCHAR(10),
+      ADD COLUMN IF NOT EXISTS cp_emisor VARCHAR(10),
+      ADD COLUMN IF NOT EXISTS fecha_pago TIMESTAMP WITH TIME ZONE;
+      
+      -- Añadir Foreign Key si no existe
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.table_constraints 
+          WHERE constraint_name = 'fk_empresa_receptor'
+        ) THEN
+          ALTER TABLE facturas_recibidas 
+          ADD CONSTRAINT fk_empresa_receptor FOREIGN KEY (rfc_receptor) REFERENCES empresas(rfc);
+        END IF;
+      END $$;
     `);
 
     // Migración para bases de datos existentes
@@ -128,9 +177,34 @@ async function autoSetup() {
         valor_unitario DECIMAL(18, 6),
         importe DECIMAL(18, 6),
         descuento DECIMAL(18, 6),
-        objeto_imp VARCHAR(5)
+        objeto_imp VARCHAR(5),
+        anomalia_precio BOOLEAN DEFAULT FALSE,
+        anomalia_detalles TEXT
       );
+      
+      -- Migración para la tabla existente
+      DO $$
+      BEGIN
+        ALTER TABLE factura_conceptos ADD COLUMN IF NOT EXISTS anomalia_precio BOOLEAN DEFAULT FALSE;
+        ALTER TABLE factura_conceptos ADD COLUMN IF NOT EXISTS anomalia_detalles TEXT;
+      EXCEPTION
+        WHEN others THEN null;
+      END $$;
+      
       CREATE INDEX IF NOT EXISTS idx_concepto_uuid ON factura_conceptos(uuid_factura);
+    `);
+
+    // 2.5 Relaciones de Complementos de Pago
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS complemento_relaciones (
+        id SERIAL PRIMARY KEY,
+        uuid_pago UUID REFERENCES facturas_recibidas(uuid) ON DELETE CASCADE,
+        uuid_relacionado UUID,
+        importe_pagado DECIMAL(14, 2),
+        moneda VARCHAR(10)
+      );
+      CREATE INDEX IF NOT EXISTS idx_relacion_pago ON complemento_relaciones(uuid_pago);
+      CREATE INDEX IF NOT EXISTS idx_relacion_factura ON complemento_relaciones(uuid_relacionado);
     `);
 
     // 3. Catálogo de cuentas contables
@@ -155,14 +229,22 @@ async function autoSetup() {
       ON CONFLICT (codigo_cuenta) DO NOTHING;
     `);
 
-    // 4. Mapeo contable por proveedor
+    // 4. Mapeo contable por proveedor y datos de contacto
     await db.query(`
       CREATE TABLE IF NOT EXISTS configuracion_contable_proveedor (
         rfc_emisor VARCHAR(13) PRIMARY KEY,
         cuenta_pasivo_id INT REFERENCES cuentas_contables(id),
         cuenta_gasto_id INT REFERENCES cuentas_contables(id),
-        cuenta_iva_pendiente_id INT REFERENCES cuentas_contables(id)
+        cuenta_iva_pendiente_id INT REFERENCES cuentas_contables(id),
+        correo_contacto VARCHAR(150)
       );
+      
+      DO $$
+      BEGIN
+        ALTER TABLE configuracion_contable_proveedor ADD COLUMN IF NOT EXISTS correo_contacto VARCHAR(150);
+      EXCEPTION
+        WHEN others THEN null;
+      END $$;
     `);
 
     // 5. Pólizas contables
@@ -200,13 +282,50 @@ async function autoSetup() {
     `);
 
     // 8. Usuarios del sistema
+    // Migrar primero el tipo de dato o constraint si existía
+    await db.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.table_constraints 
+          WHERE constraint_name = 'usuarios_rol_check'
+        ) THEN
+          ALTER TABLE usuarios DROP CONSTRAINT usuarios_rol_check;
+        END IF;
+      END $$;
+    `);
+
     await db.query(`
       CREATE TABLE IF NOT EXISTS usuarios (
         id SERIAL PRIMARY KEY,
         usuario VARCHAR(50) UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        rol VARCHAR(20) DEFAULT 'admin' CHECK (rol IN ('admin', 'viewer')),
+        rol VARCHAR(20) DEFAULT 'admin',
         activo BOOLEAN DEFAULT TRUE,
+        creado_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Restaurar/Crear la nueva restricción con los nuevos roles
+      DO $$
+      BEGIN
+        ALTER TABLE usuarios ADD CONSTRAINT usuarios_rol_check 
+        CHECK (rol IN ('admin', 'contador', 'auditor', 'auxiliar'));
+      EXCEPTION
+        WHEN duplicate_object THEN null;
+      END $$;
+    `);
+
+    // 8.5. Tabla de Auditoría (Audit Logs)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        usuario_id INT REFERENCES usuarios(id) ON DELETE SET NULL,
+        usuario_nombre VARCHAR(50),
+        accion VARCHAR(100) NOT NULL,
+        entidad VARCHAR(50),
+        entidad_id VARCHAR(100),
+        ip_address VARCHAR(50),
+        detalles JSONB,
         creado_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -251,41 +370,14 @@ function verifyPassword(password, storedHash) {
 }
 
 // ==========================================================
-// TAREAS PROGRAMADAS (CRON JOBS) - AUTOMATIZACIÓN FANTASMA
-// ==========================================================
-// Mejora: maxBuffer amplio para evitar caídas en procesos con muchos logs
-console.log('⏰ Programando tareas automáticas (Cron Jobs)...');
+import { setupRepeatableJobs, satQueue, nasQueue } from './utils/queues.js';
+import { cacheMiddleware, clearCachePrefix } from './utils/cache.js';
+import { requireRole } from './utils/rbac.js';
+import { registrarAuditoria } from './utils/audit.js';
+import { procesarReciboOCR } from './utils/ocr.js';
 
-const execOpts = { maxBuffer: 1024 * 1024 * 50 };
-
-// A la 1:00 AM: Pedir facturas al SAT (Todo el mes o año)
-cron.schedule('0 1 * * *', () => {
-  console.log('🌙 [CRON 1:00 AM] Iniciando petición nocturna al SAT...');
-  const child = spawn('node index.js', { shell: true });
-  child.stdout.on('data', data => process.stdout.write(data));
-  child.stderr.on('data', data => process.stderr.write(data));
-  child.on('error', err => console.error(`Error en index.js:`, err));
-});
-
-// A las 2:00 AM: Verificar y Descargar paquetes (El SAT tarda en procesar)
-cron.schedule('0 2 * * *', () => {
-  console.log('📥 [CRON 2:00 AM] Verificando y descargando paquetes del SAT...');
-  const child = spawn('node verify.js', { shell: true });
-  child.stdout.on('data', data => process.stdout.write(data));
-  child.stderr.on('data', data => process.stderr.write(data));
-  child.on('error', err => console.error(`Error en verify.js:`, err));
-});
-
-// A las 3:00 AM: Barrer el NAS y armar expedientes IA con los nuevos XMLs
-cron.schedule('0 3 * * *', () => {
-  console.log('🤖 [CRON 3:00 AM] Iniciando orquestador IA en el NAS...');
-  const child = spawn('node synology_scanner.js', { shell: true });
-  child.stdout.on('data', data => process.stdout.write(data));
-  child.stderr.on('data', data => process.stderr.write(data));
-  child.on('error', err => console.error(`Error en scanner:`, err));
-});
-
-console.log('✅ Tareas automáticas programadas (1:00 AM, 2:00 AM, 3:00 AM).');
+// Inicializar colas y workers (sustituye a node-cron)
+setupRepeatableJobs().catch(err => console.error('Error al inicializar BullMQ:', err));
 
 // 🛡️ Rate Limiting Estricto para tareas pesadas (SAT, NAS): Max 5 peticiones por hora
 const heavyTasksLimiter = rateLimit({
@@ -352,8 +444,16 @@ app.post('/api/login', async (req, res) => {
 // ==========================================================
 // ENDPOINT 1: OBTENER FACTURAS PARA EL DASHBOARD
 // ==========================================================
-app.get('/api/facturas', authenticateToken, async (req, res) => {
+app.get('/api/facturas', authenticateToken, cacheMiddleware(60), async (req, res) => {
+  const empresaRfc = req.headers['x-empresa-rfc'];
   try {
+    let whereClause = '';
+    const params = [];
+    if (empresaRfc) {
+      whereClause = 'WHERE rfc_receptor = $1';
+      params.push(empresaRfc);
+    }
+
     const result = await db.query(
       `SELECT 
         uuid, 
@@ -382,8 +482,11 @@ app.get('/api/facturas', authenticateToken, async (req, res) => {
        ,tipo_cambio as tipo_cambio_xml
        ,alerta_efos
        ,estatus_fiscal
+       ,aprobado
+       ,rfc_receptor
        FROM facturas_recibidas 
-       ORDER BY fecha_emision DESC`
+       ${whereClause}
+       ORDER BY fecha_emision DESC`, params
     );
     res.json(result.rows);
   } catch (err) {
@@ -395,8 +498,16 @@ app.get('/api/facturas', authenticateToken, async (req, res) => {
 // ==========================================================
 // ENDPOINT 1.5: OBTENER DATOS PARA LA VENTANA DE GASTOS
 // ==========================================================
-app.get('/api/gastos', authenticateToken, async (req, res) => {
+app.get('/api/gastos', authenticateToken, cacheMiddleware(300), async (req, res) => {
+  const empresaRfc = req.headers['x-empresa-rfc'];
   try {
+    let whereClause = `tipo_comprobante = 'I' AND estatus_pago = 'pendiente'`;
+    const params = [];
+    if (empresaRfc) {
+      whereClause += ` AND rfc_receptor = $1`;
+      params.push(empresaRfc);
+    }
+
     const result = await db.query(
       `SELECT 
         TO_CHAR(f.fecha_emision, 'YYYY-MM-DD') as fecha,
@@ -441,20 +552,39 @@ app.get('/api/gastos', authenticateToken, async (req, res) => {
 });
 
 // ==========================================================
-// ENDPOINT 1.6: APROBAR GASTO (CACHE EN BD)
+// ENDPOINT 2: APROBAR UNA FACTURA
 // ==========================================================
-app.post('/api/facturas/:uuid/aprobar', authenticateToken, async (req, res) => {
+app.post('/api/facturas/:uuid/aprobar', authenticateToken, requireRole(['admin', 'contador']), async (req, res) => {
   const { uuid } = req.params;
   try {
     const result = await db.query(
       `UPDATE facturas_recibidas 
-       SET aprobado = NOT COALESCE(aprobado, false) 
+       SET aprobado = NOT aprobado 
        WHERE uuid = $1 
-       RETURNING aprobado`,
+       RETURNING aprobado, rfc_receptor, total`,
       [uuid]
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Factura no encontrada' });
-    res.json({ mensaje: 'Estatus actualizado', aprobado: result.rows[0].aprobado });
+    
+    // Invalida el caché cuando hay una aprobación
+    await clearCachePrefix('/api/facturas');
+    await clearCachePrefix('/api/gastos');
+    
+    const nuevoEstatus = result.rows[0].aprobado;
+    
+    // Guardar en la bitácora
+    await registrarAuditoria(req, 
+      nuevoEstatus ? 'Aprobación de Factura' : 'Des-aprobación de Factura',
+      'facturas_recibidas',
+      uuid,
+      { 
+        nuevo_estatus: nuevoEstatus,
+        rfc_receptor: result.rows[0].rfc_receptor,
+        total: result.rows[0].total
+      }
+    );
+
+    res.json({ mensaje: 'Estatus actualizado', aprobado: nuevoEstatus });
   } catch (err) {
     console.error("Error al aprobar:", err);
     res.status(500).json({ error: err.message });
@@ -477,6 +607,31 @@ app.post('/api/bancos/conciliar', authenticateToken, uploadCsv.single('estadoCue
     // Formato esperado: Fecha, Concepto, Cargo, Abono, Saldo
     let conciliadas = 0;
     const report = [];
+
+    // Pre-cargar proveedores para heurística Knapsack
+    const proveedoresResult = await db.query('SELECT DISTINCT rfc_emisor, nombre_emisor FROM facturas_recibidas');
+    const proveedores = proveedoresResult.rows;
+
+    function findSubsetSum(arr, target, tolerance = 0.01) {
+      arr.sort((a, b) => parseFloat(b.total) - parseFloat(a.total));
+      const maxItems = Math.min(arr.length, 20); // Limitar a 20 para evitar explosión
+      
+      function solve(index, currentTarget, currentSubset) {
+        if (Math.abs(currentTarget) <= tolerance) return currentSubset;
+        if (currentTarget < -tolerance || index >= maxItems) return null;
+        
+        const val = parseFloat(arr[index].total);
+        if (val - currentTarget > tolerance) {
+            return solve(index + 1, currentTarget, currentSubset);
+        }
+        
+        let res = solve(index + 1, currentTarget - val, [...currentSubset, arr[index]]);
+        if (res) return res;
+        
+        return solve(index + 1, currentTarget, currentSubset);
+      }
+      return solve(0, target, []);
+    }
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -503,6 +658,36 @@ app.post('/api/bancos/conciliar', authenticateToken, uploadCsv.single('estadoCue
 
       const facturas = matchQuery.rows;
       if (facturas.length === 0) {
+        // --- INICIO KNAPSACK ---
+        const posibleProveedor = proveedores.find(p => 
+          (p.rfc_emisor && concepto.toUpperCase().includes(p.rfc_emisor.toUpperCase())) || 
+          (p.nombre_emisor && concepto.toUpperCase().includes(p.nombre_emisor.toUpperCase()))
+        );
+
+        if (posibleProveedor) {
+          const pendingQuery = await db.query(
+            `SELECT uuid, total, nombre_emisor FROM facturas_recibidas WHERE rfc_emisor = $1 AND estatus_pago = 'pendiente'`,
+            [posibleProveedor.rfc_emisor]
+          );
+          
+          if (pendingQuery.rows.length > 0) {
+            const subset = findSubsetSum(pendingQuery.rows, cargo, 0.01);
+            if (subset && subset.length > 0) {
+              const uuids = subset.map(s => s.uuid);
+              await db.query(
+                `UPDATE facturas_recibidas 
+                 SET estatus_pago = 'pagado', id_transaccion_banco = $1, fecha_pago = CURRENT_TIMESTAMP
+                 WHERE uuid = ANY($2)`,
+                [`MANUAL-CSV-${Date.now()}`, uuids]
+              );
+              conciliadas += subset.length;
+              report.push({ concepto, monto: cargo, estatus: 'Conciliadas múltiples (Knapsack)', uuid: uuids.join(', '), proveedor: posibleProveedor.nombre_emisor });
+              continue;
+            }
+          }
+        }
+        // --- FIN KNAPSACK ---
+
         report.push({ concepto, monto: cargo, estatus: 'No match exacto' });
         continue;
       }
@@ -519,7 +704,7 @@ app.post('/api/bancos/conciliar', authenticateToken, uploadCsv.single('estadoCue
         // Actualizar estatus a pagado
         await db.query(
           `UPDATE facturas_recibidas 
-           SET estatus_pago = 'pagado', id_transaccion_banco = $1
+           SET estatus_pago = 'pagado', id_transaccion_banco = $1, fecha_pago = CURRENT_TIMESTAMP
            WHERE uuid = $2`,
           [`MANUAL-CSV-${Date.now()}`, match.uuid]
         );
@@ -540,85 +725,246 @@ app.post('/api/bancos/conciliar', authenticateToken, uploadCsv.single('estadoCue
 // ==========================================================
 // ENDPOINT 2: DISPARAR EL ORQUESTADOR IA (SYNOLOGY SCANNER)
 // ==========================================================
-app.post('/api/escanear-nas', authenticateToken, heavyTasksLimiter, (req, res) => {
-  console.log("🚀 Iniciando escaneo del NAS en segundo plano...");
+app.post('/api/escanear-nas', authenticateToken, requireRole(['admin', 'auxiliar']), heavyTasksLimiter, async (req, res) => {
+  console.log("🚀 Encolando escaneo del NAS...");
   const tarea = 'Escaneo Synology NAS';
-  io.emit('process-log', { tarea, linea: '🚀 Iniciando escaneo del NAS...', ts: new Date().toISOString() });
+  io.emit('process-log', { tarea, linea: '🚀 Escaneo del NAS añadido a la cola...', ts: new Date().toISOString() });
 
-  const child = spawn('node synology_scanner.js', { shell: true });
-  child.stdout.on('data', data => {
-    const output = data.toString();
-    process.stdout.write(output);
-    output.split('\n').filter(l => l.trim()).forEach(linea => {
-      io.emit('process-log', { tarea, linea, ts: new Date().toISOString() });
-    });
-    const match = output.match(/\[PROGRESS\] (.*)/);
-    if (match) io.emit('sync-progress', { task: tarea, message: match[1] });
-  });
-  child.stderr.on('data', data => {
-    process.stderr.write(data);
-    data.toString().split('\n').filter(l => l.trim()).forEach(linea => {
-      io.emit('process-log', { tarea, linea: `⚠️ ${linea}`, ts: new Date().toISOString() });
-    });
-  });
-
-  child.on('close', (code) => {
-    if (code === 0) {
-      io.emit('task-completed', { task: tarea, message: 'Nuevos comprobantes enlazados exitosamente.' });
-      io.emit('process-log', { tarea, linea: '✅ Proceso finalizado correctamente.', ts: new Date().toISOString() });
-    } else {
-      io.emit('task-error', { task: tarea, error: `El proceso terminó con código ${code}` });
-      io.emit('process-log', { tarea, linea: `❌ Proceso terminó con código ${code}`, ts: new Date().toISOString() });
-    }
-  });
-
-  res.json({ mensaje: "Escaneo del NAS iniciado en segundo plano." });
+  try {
+    await nasQueue.add('scanNas', {});
+    await registrarAuditoria(req, 'Disparo Manual Escaneo NAS', 'nasQueue', 'N/A', {});
+    res.json({ mensaje: "Escaneo del NAS encolado exitosamente." });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "No se pudo encolar la tarea" });
+  }
 });
 
 
 // ==========================================================
 // ENDPOINT 3: DESCARGA DEL SAT (MOCK POR AHORA)
 // ==========================================================
-app.post('/api/sat/sync', authenticateToken, heavyTasksLimiter, (req, res) => {
+app.post('/api/sat/sync', authenticateToken, requireRole(['admin', 'auxiliar']), heavyTasksLimiter, async (req, res) => {
   const { fechaInicio, fechaFin, estatus } = req.body || {};
-  console.log(`☁️ Sincronización SAT disparada. Rango: ${fechaInicio} a ${fechaFin}. Estatus: ${estatus}`);
+  console.log(`☁️ Sincronización SAT encolada. Rango: ${fechaInicio} a ${fechaFin}. Estatus: ${estatus}`);
   const tarea = 'Sincronización SAT';
-  io.emit('process-log', { tarea, linea: `☁️ Iniciando descarga masiva del SAT (Estatus: ${estatus})...`, ts: new Date().toISOString() });
+  io.emit('process-log', { tarea, linea: `☁️ Sincronización SAT añadida a la cola (Estatus: ${estatus})...`, ts: new Date().toISOString() });
 
-  // Pasamos los parámetros al index.js
-  const args = [fechaInicio, fechaFin, estatus].map(a => a ? `"${a}"` : `""`).join(' ');
-  const child = spawn(`node index.js ${args} && node verify.js`, { shell: true });
-  child.stdout.on('data', data => {
-    const output = data.toString();
-    process.stdout.write(output);
-    output.split('\n').filter(l => l.trim()).forEach(linea => {
-      io.emit('process-log', { tarea, linea, ts: new Date().toISOString() });
+  try {
+    await satQueue.add('downloadSat', { fechaInicio, fechaFin, estatus });
+    
+    await registrarAuditoria(req, 'Disparo Sincronización SAT', 'satQueue', 'N/A', {
+      fechaInicio,
+      fechaFin,
+      estatus
     });
-    const match = output.match(/\[PROGRESS\] (.*)/);
-    if (match) io.emit('sync-progress', { task: tarea, message: match[1] });
-  });
-  child.stderr.on('data', data => {
-    process.stderr.write(data);
-    data.toString().split('\n').filter(l => l.trim()).forEach(linea => {
-      io.emit('process-log', { tarea, linea: `⚠️ ${linea}`, ts: new Date().toISOString() });
-    });
-  });
 
-  child.on('close', (code) => {
-    if (code === 0) {
-      io.emit('task-completed', { task: tarea, message: 'Nuevos XMLs descargados e ingresados al NAS.' });
-      io.emit('process-log', { tarea, linea: '✅ Descarga SAT finalizada correctamente.', ts: new Date().toISOString() });
-    } else {
-      io.emit('task-error', { task: tarea, error: `El proceso terminó con código ${code}` });
-      io.emit('process-log', { tarea, linea: `❌ Error en descarga SAT (código ${code})`, ts: new Date().toISOString() });
-    }
-  });
-
-  res.json({ mensaje: "Proceso SAT iniciado en segundo plano." });
+    // Nota: El verifySat correrá en la madrugada mediante cron, o podemos encolarlo secuencialmente en el worker
+    res.json({ mensaje: "Proceso SAT encolado exitosamente." });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "No se pudo encolar la tarea" });
+  }
 });
 
 // ==========================================================
-// ENDPOINT 4: SUBIDA MANUAL DE COMPROBANTES DE PAGO
+// ENDPOINT 4: VISOR DE AUDITORÍA (SOLO ADMIN/AUDITOR)
+// ==========================================================
+app.get('/api/audit-logs', authenticateToken, requireRole(['admin', 'auditor']), async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, usuario_nombre, accion, entidad, entidad_id, ip_address, detalles, creado_en 
+       FROM audit_logs 
+       ORDER BY creado_en DESC 
+       LIMIT 100`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error al obtener audit logs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================================
+// ENDPOINT 4.5: AUDITORÍA DE REPS HUÉRFANOS
+// ==========================================================
+app.get('/api/auditoria/reps-huerfanos', authenticateToken, requireRole(['admin', 'auditor', 'contador']), async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        cr.uuid_pago as uuid,
+        'Falta Factura Origen' as anomalia,
+        f_pago.nombre_emisor as proveedor,
+        TO_CHAR(f_pago.fecha_emision, 'YYYY-MM-DD') as fecha,
+        cr.importe_pagado as monto,
+        cr.moneda
+      FROM complemento_relaciones cr
+      JOIN facturas_recibidas f_pago ON f_pago.uuid = cr.uuid_pago
+      WHERE NOT EXISTS (
+        SELECT 1 FROM facturas_recibidas f_origen WHERE f_origen.uuid = cr.uuid_relacionado
+      )
+      UNION ALL
+      SELECT
+        f.uuid,
+        'Falta REP (Pago)' as anomalia,
+        f.nombre_emisor as proveedor,
+        TO_CHAR(f.fecha_emision, 'YYYY-MM-DD') as fecha,
+        f.total as monto,
+        f.moneda
+      FROM facturas_recibidas f
+      WHERE f.tipo_comprobante = 'I' AND f.metodo_pago = 'PPD'
+      AND NOT EXISTS (
+        SELECT 1 FROM complemento_relaciones cr WHERE cr.uuid_relacionado = f.uuid
+      )
+      ORDER BY fecha DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error al obtener REPs huérfanos:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================================
+// ENDPOINT 5: OCR MULTIMODAL PARA RECIBOS NO FISCALES
+// ==========================================================
+app.post('/api/recibos/subir', authenticateToken, requireRole(['admin', 'auxiliar', 'contador']), upload.single('documento'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se envió ningún documento' });
+  
+  const { rfc_receptor } = req.body;
+  
+  try {
+    const filePath = req.file.path;
+    const originalName = req.file.originalname;
+    
+    // Extraer datos usando la IA Multimodal (Ollama)
+    const datosRecibo = await procesarReciboOCR(filePath, originalName);
+    
+    // Generar un UUID falso/local para facturas_recibidas
+    const { randomUUID } = await import('crypto');
+    const localUuid = randomUUID();
+    
+    // Insertar el gasto en facturas_recibidas como Tipo 'N' (No fiscal)
+    await db.query(
+      `INSERT INTO facturas_recibidas 
+       (uuid, rfc_emisor, nombre_emisor, fecha_emision, total, estatus, estatus_fiscal, tipo_comprobante, rfc_receptor)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        localUuid, 
+        'XAXX010101000', // RFC Genérico Nacional
+        datosRecibo.proveedor || 'Proveedor Desconocido',
+        datosRecibo.fecha || new Date().toISOString().split('T')[0],
+        datosRecibo.monto || 0,
+        'pendiente',
+        'no_fiscal',
+        'N', // Tipo N para identificarlo en el Dashboard
+        rfc_receptor || null
+      ]
+    );
+
+    // Insertar el concepto (para que aparezca en el Módulo de Compras/Conceptos)
+    await db.query(
+      `INSERT INTO factura_conceptos 
+       (uuid_factura, clave_prod_serv, descripcion, valor_unitario, importe)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        localUuid,
+        '01010101', // Clave genérica "No existe en el catálogo"
+        datosRecibo.concepto || 'Gasto no fiscal',
+        datosRecibo.monto || 0,
+        datosRecibo.monto || 0
+      ]
+    );
+
+    // Invalida el caché
+    await clearCachePrefix('/api/facturas');
+    await clearCachePrefix('/api/gastos');
+    
+    await registrarAuditoria(req, 'Carga Recibo No Fiscal (OCR)', 'facturas_recibidas', localUuid, { datosExtraidos: datosRecibo });
+
+    // Borrar el archivo temporal
+    fs.unlinkSync(filePath);
+
+    res.json({ mensaje: 'Recibo procesado e ingresado exitosamente.', datosExtraidos: datosRecibo });
+  } catch (err) {
+    console.error('Error procesando recibo no fiscal:', err);
+    if (req.file) fs.unlinkSync(req.file.path);
+    res.status(500).json({ error: 'No se pudo procesar el recibo usando IA.' });
+  }
+});
+
+// ==========================================================
+// ENDPOINT 5.5: SUBIDA DE TICKET DESDE CELULAR (QR CROSS-DEVICE)
+// ==========================================================
+// No usa authenticateToken porque la sesión del celular es temporal/anónima
+app.post('/api/recibos/upload-qr/:sessionId', upload.single('documento'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se envió ningún documento' });
+  const { sessionId } = req.params;
+  
+  try {
+    const filePath = req.file.path;
+    const originalName = req.file.originalname;
+    
+    // Extraer datos usando la IA Multimodal (Ollama)
+    const datosRecibo = await procesarReciboOCR(filePath, originalName);
+    
+    // Generar un UUID falso/local para facturas_recibidas
+    const { randomUUID } = await import('crypto');
+    const localUuid = randomUUID();
+    
+    // Insertar el gasto en facturas_recibidas como Tipo 'N' (No fiscal)
+    await db.query(
+      `INSERT INTO facturas_recibidas 
+       (uuid, rfc_emisor, nombre_emisor, fecha_emision, total, estatus, estatus_fiscal, tipo_comprobante, rfc_receptor)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        localUuid, 
+        'XAXX010101000', 
+        datosRecibo.proveedor || 'Proveedor Desconocido',
+        datosRecibo.fecha || new Date().toISOString().split('T')[0],
+        datosRecibo.monto || 0,
+        'pendiente',
+        'no_fiscal',
+        'N', 
+        null
+      ]
+    );
+
+    // Insertar el concepto
+    await db.query(
+      `INSERT INTO factura_conceptos 
+       (uuid_factura, clave_prod_serv, descripcion, valor_unitario, importe)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        localUuid,
+        '01010101', 
+        datosRecibo.concepto || 'Gasto no fiscal',
+        datosRecibo.monto || 0,
+        datosRecibo.monto || 0
+      ]
+    );
+
+    // Invalida el caché
+    await clearCachePrefix('/api/facturas');
+    await clearCachePrefix('/api/gastos');
+    
+    // Borrar el archivo temporal
+    fs.unlinkSync(filePath);
+
+    // Avisar al Desktop
+    io.emit(`qr_completed_${sessionId}`, { success: true, datosExtraidos: datosRecibo });
+
+    res.json({ mensaje: 'Recibo procesado e ingresado exitosamente.', datosExtraidos: datosRecibo });
+  } catch (err) {
+    console.error('Error procesando recibo no fiscal (QR):', err);
+    if (req.file) fs.unlinkSync(req.file.path);
+    io.emit(`qr_completed_${sessionId}`, { success: false, error: 'No se pudo procesar el recibo usando IA.' });
+    res.status(500).json({ error: 'No se pudo procesar el recibo usando IA.' });
+  }
+});
+
+// ==========================================================
+// ENDPOINT 6: SUBIDA MANUAL DE COMPROBANTES DE PAGO
 // ==========================================================
 app.post('/api/subir-pago/:uuid', authenticateToken, upload.single('documento'), async (req, res) => {
   const { uuid } = req.params;
@@ -663,7 +1009,7 @@ app.post('/api/subir-pago/:uuid', authenticateToken, upload.single('documento'),
     // 4. Actualizar PostgreSQL a Estatus Pagado
     await db.query(
       `UPDATE facturas_recibidas 
-       SET estatus_pago = 'pagado', url_expediente = $1 
+       SET estatus_pago = 'pagado', url_expediente = $1, fecha_pago = CURRENT_TIMESTAMP 
        WHERE uuid = $2`,
       [carpetaDossier, uuid]
     );
@@ -978,6 +1324,58 @@ app.post('/api/contabilidad/mapear-proveedor', authenticateToken, async (req, re
 });
 
 // ==========================================================
+// MÓDULO CONTABLE: ENDPOINT 12.1 - API BRIDGE CONTPAQi (JSON)
+// ==========================================================
+app.get('/api/contabilidad/polizas.json', authenticateToken, requireRole(['admin', 'contador']), async (req, res) => {
+  const { anio, mes, dia } = req.query; // Ej. ?anio=2026&mes=05&dia=15
+  try {
+    let dateFilter = "TO_CHAR(f.fecha_emision, 'YYYY-MM') = $1";
+    let params = [`${anio}-${mes}`];
+    if (dia && dia !== 'Todos') {
+      dateFilter = "TO_CHAR(f.fecha_emision, 'YYYY-MM-DD') = $1";
+      params = [`${anio}-${mes}-${dia}`];
+    }
+
+    const query = await db.query(`
+      SELECT f.uuid, f.rfc_receptor, f.nombre_emisor, f.total, f.fecha_emision, f.folio_interno,
+             COALESCE(f.subtotal, ROUND((f.total / 1.16), 2)) as subtotal,
+             COALESCE(f.iva, ROUND((f.total - (f.total / 1.16)), 2)) as iva,
+             cg.codigo_cuenta as cta_gasto, cg.id as cta_gasto_id,
+             cp.codigo_cuenta as cta_pasivo, cp.id as cta_pasivo_id,
+             civa.codigo_cuenta as cta_iva, civa.id as cta_iva_id
+      FROM facturas_recibidas f
+      JOIN configuracion_contable_proveedor cc ON f.rfc_emisor = cc.rfc_emisor
+      JOIN cuentas_contables cg ON cc.cuenta_gasto_id = cg.id
+      JOIN cuentas_contables cp ON cc.cuenta_pasivo_id = cp.id
+      JOIN cuentas_contables civa ON cc.cuenta_iva_pendiente_id = civa.id
+      WHERE ${dateFilter} AND f.tipo_comprobante = 'I'
+    `, params);
+
+    const polizasJson = query.rows.map(factura => {
+      const fechaFormateada = new Date(factura.fecha_emision).toISOString().slice(0,10).replace(/-/g, '');
+      const conceptoPoliza = `Fca Prov: ${factura.nombre_emisor.substring(0,30)} Folio ${factura.folio_interno || ''}`;
+      
+      return {
+        rfc_receptor: factura.rfc_receptor,
+        tipo: 'Diario',
+        fecha: fechaFormateada,
+        concepto: conceptoPoliza,
+        movimientos: [
+          { cuenta: factura.cta_gasto, tipo_movimiento: 'Cargo', importe: Number(factura.subtotal).toFixed(2), referencia: factura.uuid },
+          { cuenta: factura.cta_iva, tipo_movimiento: 'Cargo', importe: Number(factura.iva).toFixed(2), referencia: factura.uuid },
+          { cuenta: factura.cta_pasivo, tipo_movimiento: 'Abono', importe: factura.total, referencia: factura.uuid }
+        ]
+      };
+    });
+
+    res.json({ success: true, polizas: polizasJson });
+  } catch (err) {
+    console.error("❌ Error en API Bridge CONTPAQi:", err);
+    res.status(500).json({ error: 'Falla al extraer pólizas' });
+  }
+});
+
+// ==========================================================
 // MÓDULO CONTABLE: ENDPOINT 12 - EXPORTAR CONTPAQi
 // ==========================================================
 app.get('/api/contabilidad/exportar-contpaqi', authenticateToken, async (req, res) => {
@@ -1178,7 +1576,7 @@ app.get('/api/contabilidad/exportar-diot', authenticateToken, async (req, res) =
 // ==========================================================
 // INTELIGENCIA DE COMPRAS: BUSCAR CONCEPTOS E HISTÓRICO
 // ==========================================================
-app.get('/api/conceptos/buscar', authenticateToken, async (req, res) => {
+app.get('/api/conceptos/buscar', authenticateToken, cacheMiddleware(60), async (req, res) => {
   const { q } = req.query;
   if (!q) return res.json([]);
   
@@ -1308,8 +1706,94 @@ app.post('/api/fiscal/verificar-estatus-sat', authenticateToken, async (req, res
 });
 
 // ==========================================================
+// MÓDULO DASHBOARD: ENDPOINT 13.1 - FLUJO DE EFECTIVO PROYECTADO
+// ==========================================================
+app.get('/api/dashboard/flujo', authenticateToken, async (req, res) => {
+  try {
+    const { rfc_receptor } = req.query;
+    let rfcFilter = "1=1";
+    let params = [];
+    if (rfc_receptor && rfc_receptor !== 'Todas') {
+      rfcFilter = "rfc_receptor = $1";
+      params = [rfc_receptor];
+    }
+
+    const query = await db.query(`
+      WITH stats_proveedor AS (
+        SELECT rfc_emisor, COALESCE(AVG(EXTRACT(EPOCH FROM (fecha_pago - fecha_emision))/86400), 30) as dias_pago_promedio
+        FROM facturas_recibidas
+        WHERE estatus_pago = 'pagado' AND fecha_pago IS NOT NULL
+        GROUP BY rfc_emisor
+      ),
+      proyectado AS (
+        SELECT 
+          f.uuid,
+          f.estatus_pago,
+          f.total,
+          f.fecha_pago,
+          f.fecha_emision + (COALESCE(s.dias_pago_promedio, 30) * interval '1 day') as fecha_proyectada
+        FROM facturas_recibidas f
+        LEFT JOIN stats_proveedor s ON f.rfc_emisor = s.rfc_emisor
+        WHERE ${rfcFilter} AND f.tipo_comprobante IN ('I', 'N')
+      )
+      SELECT 
+        TO_CHAR(COALESCE(fecha_pago, fecha_proyectada), 'YYYY-MM') as mes,
+        SUM(CASE WHEN estatus_pago = 'pagado' THEN total ELSE 0 END) as dinero_pagado,
+        SUM(CASE WHEN estatus_pago = 'pendiente' THEN total ELSE 0 END) as pasivo_proyectado
+      FROM proyectado
+      GROUP BY TO_CHAR(COALESCE(fecha_pago, fecha_proyectada), 'YYYY-MM')
+      ORDER BY mes ASC
+      LIMIT 12
+    `, params);
+    
+    // Transformar a numéricos para Recharts
+    const data = query.rows.map(row => ({
+      mes: row.mes,
+      pagado: parseFloat(row.dinero_pagado),
+      pasivo: parseFloat(row.pasivo_proyectado)
+    }));
+
+    res.json(data);
+  } catch (err) {
+    console.error("❌ Error en flujo de efectivo:", err);
+    res.status(500).json({ error: 'Falla al extraer datos de flujo' });
+  }
+});
+
+// ==========================================================
+// MÓDULO AUDITORÍA: ENDPOINT 14 - REPs HUÉRFANOS
+// ==========================================================
+app.get('/api/auditoria/reps-huerfanos', authenticateToken, async (req, res) => {
+  try {
+    const query = await db.query(`
+      SELECT 
+        p.uuid AS uuid_pago,
+        p.fecha_emision,
+        p.rfc_emisor,
+        p.nombre_emisor,
+        p.total AS total_pago,
+        r.uuid_relacionado,
+        r.importe_pagado,
+        r.moneda
+      FROM facturas_recibidas p
+      JOIN complemento_relaciones r ON p.uuid = r.uuid_pago
+      LEFT JOIN facturas_recibidas f ON r.uuid_relacionado = f.uuid
+      WHERE p.tipo_comprobante = 'P' 
+        AND (f.uuid IS NULL OR f.estatus_fiscal = 'cancelado')
+      ORDER BY p.fecha_emision DESC
+    `);
+    
+    res.json(query.rows);
+  } catch (err) {
+    console.error("❌ Error en auditoría de REPs:", err);
+    res.status(500).json({ error: 'Falla al extraer datos de REPs huérfanos' });
+  }
+});
+
+// ==========================================================
 // INICIAR SERVIDOR
 // ==========================================================
+app.set('io', io);
 // Registrar rutas de Inteligencia de Compras
 registerComprasEndpoints(app, db, authenticateToken);
 

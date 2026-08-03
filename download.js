@@ -214,7 +214,8 @@ async function descargarYProcesar() {
       const nombreEmisor = xmlData.nombre_emisor || 'Sin Nombre';
       const { fecha: fechaEmision, 
               total: monto, subtotal, iva, iva_retenido, isr_retenido, 
-              tipo_comprobante: tipo, metodo_pago: metodoPago, serie, folio, conceptos, rfc_receptor } = xmlData;
+              tipo_comprobante: tipo, metodo_pago: metodoPago, serie, folio, conceptos, rfc_receptor, 
+              regimen_fiscal_emisor, cp_emisor, relacionados } = xmlData;
 
       const folioCompleto = [serie, folio].filter(Boolean).join('-') || null;
 
@@ -237,8 +238,8 @@ async function descargarYProcesar() {
       try {
         const resultado = await db.query(
             `INSERT INTO facturas_recibidas 
-             (uuid, rfc_emisor, nombre_emisor, fecha_emision, total, subtotal, iva, iva_retenido, isr_retenido, estatus_pago, folio_interno, tipo_comprobante, url_expediente, metodo_pago, rfc_receptor)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pendiente', $10, $11, $12, $13, $14)
+             (uuid, rfc_emisor, nombre_emisor, regimen_fiscal_emisor, cp_emisor, fecha_emision, total, subtotal, iva, iva_retenido, isr_retenido, estatus_pago, folio_interno, tipo_comprobante, url_expediente, metodo_pago, rfc_receptor)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pendiente', $12, $13, $14, $15, $16)
            ON CONFLICT (uuid) DO UPDATE 
              SET url_expediente = EXCLUDED.url_expediente,
                  folio_interno   = COALESCE(facturas_recibidas.folio_interno, EXCLUDED.folio_interno),
@@ -248,9 +249,11 @@ async function descargarYProcesar() {
                  iva = EXCLUDED.iva,
                  iva_retenido = EXCLUDED.iva_retenido,
                  isr_retenido = EXCLUDED.isr_retenido,
-                 rfc_receptor = EXCLUDED.rfc_receptor
+                 rfc_receptor = EXCLUDED.rfc_receptor,
+                 regimen_fiscal_emisor = EXCLUDED.regimen_fiscal_emisor,
+                 cp_emisor = EXCLUDED.cp_emisor
            RETURNING (xmax = 0) AS fue_insert`,
-          [uuid, rfcEmisor, nombreEmisor, fechaEmision, monto, subtotal, iva, iva_retenido, isr_retenido, folioCompleto, tipo, carpetaDossier, metodoPago, rfc_receptor]
+          [uuid, rfcEmisor, nombreEmisor, regimen_fiscal_emisor, cp_emisor, fechaEmision, monto, subtotal, iva, iva_retenido, isr_retenido, folioCompleto, tipo, carpetaDossier, metodoPago, rfc_receptor]
         );
 
         // Guardar conceptos asociados a la factura
@@ -261,6 +264,18 @@ async function descargarYProcesar() {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
             [uuid, c.claveProdServ, c.noIdentificacion, c.cantidad, c.claveUnidad, c.unidad, c.descripcion, c.valorUnitario, c.importe, c.descuento, c.objetoImp]
           );
+        }
+
+        // Guardar relaciones del REP (si existen)
+        if (tipo === 'P' && relacionados && relacionados.length > 0) {
+          await db.query(`DELETE FROM complemento_relaciones WHERE uuid_pago = $1`, [uuid]);
+          for (const r of relacionados) {
+            await db.query(
+              `INSERT INTO complemento_relaciones (uuid_pago, uuid_relacionado, importe_pagado, moneda)
+               VALUES ($1, $2, $3, $4)`,
+              [uuid, r.uuid_relacionado, r.importe_pagado, r.moneda]
+            );
+          }
         }
 
         // xmax = 0 → fue INSERT real; xmax != 0 → fue UPDATE (ya existía)

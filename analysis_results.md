@@ -222,14 +222,15 @@ erDiagram
 
 ---
 
-## ✅ Lo Que Funciona Bien
+## ✅ Lo Que Funciona Bien (Actualizado)
 
-- El flujo completo **SAT → ZIP → XML → DB → NAS** está sólido y automatizado
-- El pipeline de conciliación híbrido (local + Ollama) es un diseño innovador
-- El "candado PPD/PUE" para bloquear egresos sin complemento es una buena regla de negocio
-- Las exportaciones a CONTPAQi (Diario, Egreso, DIOT) cubren los 3 reportes más críticos
-- La UI de React usa un design system oscuro coherente con Tailwind v4
-- Notificaciones por Telegram al completar descargas del SAT
+- **Flujo Completo SAT**: El pipeline SAT → ZIP → XML → DB → NAS está sólido y automatizado.
+- **IA Analítica (Novedad)**: Detección automática de anomalías de precios en base a promedios históricos de 6 meses.
+- **OCR Multimodal (Novedad)**: Procesamiento de recibos y tickets no fiscales (imágenes/PDFs) utilizando Ollama Vision.
+- **Integración CONTPAQi (Novedad)**: API Bridge seguro con cliente nativo en PowerShell (`puente_contpaqi.ps1`) para inyectar pólizas sin tocar SQL, soportando Mapeo Multi-Empresa.
+- **Auto-Reclamo REP (Novedad)**: Notificación automática (vía nodemailer) a proveedores morosos todos los viernes.
+- **Frontend Realtime (Novedad)**: Notificaciones Push con Socket.io (Toasts) y Gráficas de proyección de Flujo de Efectivo integradas (Recharts).
+- **Reglas de Negocio**: "Candado PPD/PUE" para bloquear egresos sin complemento.
 
 ---
 

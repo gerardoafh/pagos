@@ -69,6 +69,8 @@ async function importarHistoricos() {
         const folioCompleto = `${(contenidoXML.match(/Serie=["']([^"']+)["']/i) || [])[1] || ''}${(contenidoXML.match(/Folio=["']([^"']+)["']/i) || [])[1] || ''}`.trim();
         const tipo = (contenidoXML.match(/TipoDeComprobante=["']([^"']+)["']/i) || [])[1]?.toUpperCase() || 'I';
         const metodoPago = (contenidoXML.match(/MetodoPago=["']([^"']+)["']/i) || [])[1]?.toUpperCase() || 'PUE';
+        const regimenFiscalEmisor = (contenidoXML.match(/<cfdi:Emisor[^>]+RegimenFiscal=["']([^"']+)["']/i) || [])[1] || '';
+        const cpEmisor = (contenidoXML.match(/LugarExpedicion=["']([^"']+)["']/i) || [])[1] || '';
 
         // --- EXTRACCIÓN DE CONCEPTOS ---
         const conceptos = [];
@@ -96,14 +98,16 @@ async function importarHistoricos() {
         const carpetaDossier = path.dirname(rutaXML);
 
         const resultado = await db.query(
-          `INSERT INTO facturas_recibidas (uuid, rfc_emisor, nombre_emisor, fecha_emision, total, estatus_pago, folio_interno, tipo_comprobante, url_expediente, metodo_pago)
-           VALUES ($1, $2, $3, $4, $5, 'pendiente', $6, $7, $8, $9)
+          `INSERT INTO facturas_recibidas (uuid, rfc_emisor, nombre_emisor, regimen_fiscal_emisor, cp_emisor, fecha_emision, total, estatus_pago, folio_interno, tipo_comprobante, url_expediente, metodo_pago)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pendiente', $8, $9, $10, $11)
            ON CONFLICT (uuid) DO UPDATE SET 
              url_expediente = EXCLUDED.url_expediente, 
              metodo_pago = EXCLUDED.metodo_pago,
-             tipo_comprobante = EXCLUDED.tipo_comprobante
+             tipo_comprobante = EXCLUDED.tipo_comprobante,
+             regimen_fiscal_emisor = EXCLUDED.regimen_fiscal_emisor,
+             cp_emisor = EXCLUDED.cp_emisor
            RETURNING (xmax = 0) AS fue_insert`,
-          [uuid, rfcEmisor, nombreEmisor, fechaEmision, monto, folioCompleto, tipo, carpetaDossier, metodoPago]
+          [uuid, rfcEmisor, nombreEmisor, regimenFiscalEmisor, cpEmisor, fechaEmision, monto, folioCompleto, tipo, carpetaDossier, metodoPago]
         );
 
         // Guardar conceptos asociados a la factura

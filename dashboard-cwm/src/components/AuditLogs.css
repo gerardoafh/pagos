@@ -1,0 +1,133 @@
+.audit-container {
+  padding: 2rem;
+  background: var(--bg-card, #1a1a1a);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  color: var(--text-primary, #eaeaea);
+  margin-top: 1rem;
+}
+
+.audit-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--border-color, #333);
+  padding-bottom: 1rem;
+}
+
+.audit-header h2 {
+  margin: 0;
+  font-size: 1.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #fff;
+}
+
+.audit-header p {
+  margin: 0;
+  color: #aaa;
+  font-size: 0.95rem;
+}
+
+.audit-loading,
+.audit-error,
+.audit-empty {
+  text-align: center;
+  padding: 3rem;
+  color: #aaa;
+  font-size: 1.1rem;
+}
+
+.audit-error {
+  color: #ff5252;
+}
+
+.audit-table-container {
+  overflow-x: auto;
+}
+
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.audit-table th,
+.audit-table td {
+  padding: 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.audit-table th {
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  color: #888;
+  font-weight: 600;
+}
+
+.audit-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.audit-time {
+  color: #bbb;
+  white-space: nowrap;
+}
+
+.audit-user {
+  font-weight: 500;
+  color: #fff;
+}
+
+.audit-entity small {
+  color: #777;
+  font-family: monospace;
+}
+
+.audit-ip {
+  font-family: monospace;
+  color: #888;
+}
+
+.audit-details pre {
+  margin: 0;
+  background: #0f0f0f;
+  padding: 0.5rem;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #64ffda;
+  max-width: 300px;
+  overflow-x: auto;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.badge-success {
+  background: rgba(46, 213, 115, 0.2);
+  color: #2ed573;
+}
+
+.badge-info {
+  background: rgba(30, 144, 255, 0.2);
+  color: #1e90ff;
+}
+
+.fade-in {
+  animation: fadeIn 0.4s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}

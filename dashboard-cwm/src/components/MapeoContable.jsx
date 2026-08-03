@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, RefreshCw, AlertCircle, CheckCircle2, ChevronLeft, DownloadCloud, FileSpreadsheet } from 'lucide-react';
+import { Save, RefreshCw, AlertCircle, CheckCircle2, ChevronLeft, DownloadCloud, FileSpreadsheet, Eye, X } from 'lucide-react';
 import { API_BASE } from '../api.js';
 
 export default function MapeoContable({ token, onVolver }) {
@@ -13,6 +13,11 @@ export default function MapeoContable({ token, onVolver }) {
   const [dia, setDia] = useState('Todos');
   const [mes, setMes] = useState(String(new Date().getMonth() + 1).padStart(2, '0'));
   const [anio, setAnio] = useState(new Date().getFullYear().toString());
+
+  // Estado para previsualización
+  const [mostrarModalPolizas, setMostrarModalPolizas] = useState(false);
+  const [polizasJSON, setPolizasJSON] = useState([]);
+  const [cargandoPolizas, setCargandoPolizas] = useState(false);
 
   const cargarDatos = async () => {
     setCargando(true);
@@ -104,6 +109,28 @@ export default function MapeoContable({ token, onVolver }) {
     window.open(`${API_BASE}/api/contabilidad/exportar-diot?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}`, '_blank');
   };
 
+  const handlePrevisualizarPolizas = async () => {
+    setCargandoPolizas(true);
+    setMostrarModalPolizas(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/contabilidad/polizas.json?anio=${anio}&mes=${mes}&dia=${dia}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPolizasJSON(data);
+      } else {
+        mostrarNotificacion('Error al obtener pólizas', 'error');
+        setMostrarModalPolizas(false);
+      }
+    } catch (err) {
+      mostrarNotificacion('Error de conexión', 'error');
+      setMostrarModalPolizas(false);
+    } finally {
+      setCargandoPolizas(false);
+    }
+  };
+
   // Filtrar cuentas por tipo para llenar los selects
   const ctasGasto = cuentas.filter(c => c.tipo_cuenta === 'gasto');
   const ctasPasivo = cuentas.filter(c => c.tipo_cuenta === 'pasivo');
@@ -115,12 +142,7 @@ export default function MapeoContable({ token, onVolver }) {
       {/* Cabecera y Controles */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-gray-900 p-6 rounded-xl border border-gray-800 gap-4">
         <div>
-          <button 
-            onClick={onVolver} 
-            className="text-gray-400 hover:text-white flex items-center gap-2 mb-2 transition-colors"
-          >
-            <ChevronLeft size={16} /> Volver al Dashboard
-          </button>
+
           <h2 className="text-2xl font-bold text-white tracking-tight">Módulo Contable</h2>
           <p className="text-gray-400 text-sm mt-1">Asigna las cuentas a proveedores nuevos y exporta tus pólizas a CONTPAQi.</p>
         </div>
@@ -141,6 +163,9 @@ export default function MapeoContable({ token, onVolver }) {
               <option key={d} value={d}>Día {d}</option>
             ))}
           </select>
+          <button onClick={handlePrevisualizarPolizas} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-lg font-medium shadow-lg transition-colors text-sm" title="Previsualizar Pólizas">
+            <Eye size={16} /> Previsualizar
+          </button>
           <button onClick={handleExportar} className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2 rounded-lg font-medium shadow-lg transition-colors text-sm" title="Provisión de Facturas">
             <DownloadCloud size={16} /> Pólizas Diario
           </button>
@@ -261,6 +286,81 @@ export default function MapeoContable({ token, onVolver }) {
           </table>
         </div>
       </div>
+
+      {/* Modal Previsualizar Pólizas */}
+      {mostrarModalPolizas && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-6xl max-h-[90vh] flex flex-col shadow-2xl">
+            <div className="p-5 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
+              <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                <Eye className="text-blue-400" /> Previsualización de Pólizas (Diario)
+              </h3>
+              <button onClick={() => setMostrarModalPolizas(false)} className="text-gray-400 hover:text-white">
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div className="p-5 overflow-y-auto flex-1 bg-gray-950">
+              {cargandoPolizas ? (
+                <div className="flex flex-col items-center justify-center py-20 text-blue-400">
+                  <RefreshCw className="animate-spin mb-4" size={32} />
+                  <p>Generando pólizas...</p>
+                </div>
+              ) : polizasJSON.length === 0 ? (
+                <div className="text-center py-20 text-gray-400">
+                  <p>No se generaron pólizas para el filtro seleccionado.</p>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {polizasJSON.map((poliza, idx) => (
+                    <div key={idx} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow">
+                      <div className="bg-gray-800/50 px-4 py-3 flex justify-between items-center">
+                        <div>
+                          <p className="text-white font-bold text-sm">Póliza {poliza.tipo_poliza} - #{poliza.numero_poliza}</p>
+                          <p className="text-gray-400 text-xs mt-1">{poliza.fecha} | {poliza.concepto}</p>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs text-left">
+                          <thead className="bg-gray-950 text-gray-400">
+                            <tr>
+                              <th className="px-4 py-2 font-medium w-32">Cuenta</th>
+                              <th className="px-4 py-2 font-medium">Concepto Movimiento</th>
+                              <th className="px-4 py-2 font-medium text-right w-32">Cargo</th>
+                              <th className="px-4 py-2 font-medium text-right w-32">Abono</th>
+                              <th className="px-4 py-2 font-medium w-48">Referencia</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-800">
+                            {poliza.movimientos.map((mov, midx) => (
+                              <tr key={midx} className="hover:bg-gray-800/30">
+                                <td className="px-4 py-2 text-gray-300 font-mono">{mov.cuenta}</td>
+                                <td className="px-4 py-2 text-gray-300 truncate max-w-xs">{mov.concepto}</td>
+                                <td className="px-4 py-2 text-blue-400 text-right">{mov.tipo_mov === 'cargo' ? `$${parseFloat(mov.importe).toFixed(2)}` : ''}</td>
+                                <td className="px-4 py-2 text-emerald-400 text-right">{mov.tipo_mov === 'abono' ? `$${parseFloat(mov.importe).toFixed(2)}` : ''}</td>
+                                <td className="px-4 py-2 text-gray-500 font-mono">{mov.referencia}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            
+            <div className="p-4 border-t border-gray-800 flex justify-end bg-gray-900/50">
+              <button 
+                onClick={() => setMostrarModalPolizas(false)}
+                className="bg-gray-800 hover:bg-gray-700 text-white px-5 py-2 rounded-lg font-medium transition-colors"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

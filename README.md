@@ -40,7 +40,10 @@ El proceso nocturno corre solo, sin intervención humana:
 1:00 AM  Solicita descarga masiva al SAT
 2:00 AM  Descarga paquetes ZIP, extrae XMLs, ingesta a BD y copia al NAS
 3:00 AM  Escanea el NAS con IA (Ollama) y concilia comprobantes vs facturas
+10:00 AM (Viernes) Reclamo automático de REP a proveedores morosos
 ```
+
+Además, cuenta con capacidades de IA para detectar **anomalías en precios** (>30% de inflación) y extraer datos de **tickets no fiscales (imágenes/PDFs)** mediante OCR multimodal.
 
 ---
 
@@ -611,8 +614,22 @@ Vista de inicio después del login.
   - Tomar foto con cámara del dispositivo móvil
   - Eliminar pago / deshacer conciliación
   - Copiar UUID al portapapeles
+  - **Aprobar Factura**: Marcar como aprobada para pago (Escudo)
+  - **Verificar en SAT**: Consulta SOAP en tiempo real para verificar vigencia (Lupa)
+- **Carga Manual OCR (Tickets)**: Sube tickets no fiscales con Inteligencia Artificial (Ollama) directamente.
 - **Indicador PPD**: Candado rojo en facturas PPD pagadas sin Complemento de Pago (REP)
 - **Panel de logs** flotante en tiempo real via WebSocket
+- **Gráfica de Flujo de Efectivo** interactiva proyectando Egresos vs Pasivos
+- **Toasts Push** notificaciones en tiempo real impulsadas por Socket.io
+
+### Conciliación Bancaria (pages/Conciliacion.jsx)
+
+Interfaz automática para procesar estados de cuenta.
+
+- Arrastra y suelta (Drag & Drop) del archivo CSV bancario
+- Procesamiento y cruce de datos automático contra la base de facturas pendientes
+- Visualización de tarjetas de resultados (procesadas, exitosas, no encontradas)
+- Detalle tabular de las transacciones con estatus individual
 
 ### Gastos (pages/Gastos.jsx)
 
@@ -631,7 +648,7 @@ Análisis de precios históricos por producto o proveedor.
 - Gráfica de línea de tendencia de precios unitarios (Recharts v3)
 - Tarjeta de detalle al hacer clic en un punto de la gráfica
 - Selector de periodo (año/mes/día)
-- Exportación de todos los conceptos del periodo a CSV/Excel
+- **Exportación de Conceptos**: Descarga de todos los conceptos del periodo seleccionado (o total) directamente a un archivo CSV/Excel.
 
 ### Contabilidad (components/MapeoContable.jsx)
 
@@ -640,10 +657,14 @@ Módulo de mapeo contable y exportación para CONTPAQi.
 - Lista de proveedores "huérfanos" (sin cuentas asignadas)
 - Formulario de mapeo: Cuenta Gasto, Cuenta Pasivo, Cuenta IVA por RFC
 - Selector de periodo para exportaciones
+- **Previsualización de Pólizas**: Modal dinámico para inspeccionar asientos contables (cargos/abonos) generados por el backend en JSON, antes de exportar.
 - Botones de exportación:
   - **Pólizas de Diario** (momento de recepción de facturas)
   - **Pólizas de Egreso** (momento de pago)
   - **DIOT** (declaración informativa mensual)
+
+> [!TIP]
+> Existe un cliente PowerShell local (`puente_contpaqi.ps1`) que puede ejecutarse en el servidor Windows para inyectar estas pólizas directamente al SDK de CONTPAQi, con soporte *Multi-Tenant* (Múltiples Empresas).
 
 ### Configuración (components/Configuracion.jsx)
 
@@ -695,6 +716,17 @@ Lee hasta 1,000 archivos más recientes de `NAS_PAYMENTS_PATH`.
 - Vuelve a buscar en la BD con los datos extraídos por la IA
 
 Si se encuentra match: copia el comprobante a la carpeta del expediente y actualiza `estatus_pago = 'pagado'` en la BD.
+
+**OCR Multimodal para Recibos No Fiscales:**
+Si se suben imágenes (JPG/PNG) o PDFs escaneados de tickets de restaurante/gasolina, el sistema utiliza `poppler` y `graphicsmagick` para renderizarlos, enviándolos al cerebro multimodal de Ollama (Llava/Minicpm) para extraer Fecha, Monto, Nombre y Concepto, insertándolos como facturas "No Fiscales" (Tipo `N`).
+
+### Detección de Anomalías de Precios (`utils/aiAnomalies.js`)
+
+Escanea el historial de los últimos 6 meses del proveedor y calcula el precio promedio unitario. Si en una factura nueva detecta un sobreprecio > 30%, marca `anomalia_precio = TRUE` y genera una bitácora de auditoría.
+
+### Reclamo Automático de REP (`utils/repClaimer.js`)
+
+Ejecutado por BullMQ todos los viernes a las 10:00 AM. Busca facturas `PPD` pagadas que no tienen complemento asociado tras varios días. Si encuentra morosos, envía automáticamente un correo exigiendo el REP al `correo_contacto` del proveedor.
 
 ### npm run conciliar-xml — Complementos de Pago
 
@@ -819,3 +851,5 @@ docker compose down
 ---
 
 *Sistema desarrollado para CWM — Tesorería Automatizada 2026.*
+
+docker compose up --build -d

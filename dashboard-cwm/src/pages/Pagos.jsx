@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Search, Building2, CreditCard, Clock, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Search, Building2, CreditCard, Clock, AlertTriangle, FileWarning } from 'lucide-react';
 
 const Pagos = ({ facturas = [] }) => {
   const [busqueda, setBusqueda] = useState('');
@@ -136,6 +136,14 @@ const Pagos = ({ facturas = [] }) => {
             onChange={(e) => { setBusqueda(e.target.value); setPaginaActual(1); }}
           />
         </div>
+        
+        <button 
+          onClick={() => window.location.hash = 'reps-huerfanos'}
+          className="flex items-center gap-2 px-4 py-2 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-600/20 rounded-lg transition-colors text-sm font-medium w-full sm:w-auto justify-center"
+        >
+          <FileWarning size={18} />
+          Auditoría de REPs
+        </button>
       </div>
 
       {/* Table */}

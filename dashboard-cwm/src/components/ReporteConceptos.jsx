@@ -22,6 +22,16 @@ const PALETTE = [
 const MESES_CORTO = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
                          'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 
+// Static color class map — Tailwind needs complete class strings at build time
+const COLOR_MAP = {
+  blue:    { text: 'text-blue-400',    bg: 'bg-blue-500/10',    icon: 'text-blue-500' },
+  emerald: { text: 'text-emerald-400', bg: 'bg-emerald-500/10', icon: 'text-emerald-500' },
+  purple:  { text: 'text-purple-400',  bg: 'bg-purple-500/10',  icon: 'text-purple-500' },
+  amber:   { text: 'text-amber-400',   bg: 'bg-amber-500/10',   icon: 'text-amber-500' },
+  red:     { text: 'text-red-400',     bg: 'bg-red-500/10',     icon: 'text-red-500' },
+  gray:    { text: 'text-gray-400',    bg: 'bg-gray-500/10',    icon: 'text-gray-500' },
+};
+
 const TABS = [
   { id: 'resumen',     label: 'Resumen',           Icon: BarChart2  },
   { id: 'proveedores', label: 'Proveedores',        Icon: Users      },
@@ -155,6 +165,15 @@ export default function InteligenciaCompras({ token, onVolver }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anio, mes]);
 
+  // Interceptar apertura directa de proveedor desde otra pantalla
+  useEffect(() => {
+    const prov = localStorage.getItem('verProveedor');
+    if (prov) {
+      cargarDetalleProveedor(prov);
+      localStorage.removeItem('verProveedor');
+    }
+  }, []);
+
   // ── Fetch Detalle Proveedor ─────────────────────────────────────────────
   const cargarDetalleProveedor = async (nombre) => {
     setProveedorSeleccionado(nombre);
@@ -226,9 +245,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
       {/* ── Cabecera Global ── */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-gray-900 p-5 rounded-xl border border-gray-800">
         <div>
-          <button onClick={onVolver} className="text-gray-400 hover:text-white flex items-center gap-2 mb-2 transition-colors text-sm">
-            <ChevronLeft size={16} /> Volver al Dashboard
-          </button>
+
           <h2 className="text-2xl font-bold text-white flex items-center gap-2">
             <TrendingUp className="text-blue-400" size={24} />
             Módulo de Compras
@@ -261,6 +278,13 @@ export default function InteligenciaCompras({ token, onVolver }) {
           >
             <RefreshCw size={16} className={cargando ? 'animate-spin' : ''} />
           </button>
+          <button
+            onClick={() => window.open(`${API_BASE}/api/contabilidad/exportar-conceptos?anio=${anio}&mes=${mes}&token=${token}`, '_blank')}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2 rounded-lg font-medium shadow-lg transition-colors text-sm ml-2"
+            title="Exportar conceptos a Excel"
+          >
+            <FileSpreadsheet size={16} /> Exportar CSV
+          </button>
         </div>
       </div>
 
@@ -287,9 +311,28 @@ export default function InteligenciaCompras({ token, onVolver }) {
                 <p className="text-blue-400 font-semibold text-sm mb-1 uppercase tracking-wider flex items-center gap-2">
                   <Store size={16} /> Perfil del Proveedor
                 </p>
-                <h3 className="text-2xl font-bold text-white max-w-3xl leading-tight mb-4">
+                <h3 className="text-2xl font-bold text-white max-w-3xl leading-tight mb-2">
                   {proveedorSeleccionado}
                 </h3>
+                {detalleProveedor.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {detalleProveedor[0].rfc_emisor && (
+                      <p className="text-gray-400 font-mono text-sm bg-gray-950/50 inline-block px-3 py-1 rounded border border-gray-800">
+                        RFC: <span className="text-gray-300">{detalleProveedor[0].rfc_emisor}</span>
+                      </p>
+                    )}
+                    {detalleProveedor[0].regimen_fiscal_emisor && (
+                      <p className="text-gray-400 font-mono text-sm bg-gray-950/50 inline-block px-3 py-1 rounded border border-gray-800">
+                        Régimen: <span className="text-gray-300">{detalleProveedor[0].regimen_fiscal_emisor}</span>
+                      </p>
+                    )}
+                    {detalleProveedor[0].cp_emisor && (
+                      <p className="text-gray-400 font-mono text-sm bg-gray-950/50 inline-block px-3 py-1 rounded border border-gray-800">
+                        CP / Lugar de Expedición: <span className="text-gray-300">{detalleProveedor[0].cp_emisor}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
               
               <div className="flex gap-4">
@@ -418,19 +461,22 @@ export default function InteligenciaCompras({ token, onVolver }) {
                       { label: 'Facturas',        value: (resumen?.num_facturas || 0).toLocaleString(), color: 'emerald', Icon: Package  },
                       { label: 'Proveedores',     value: resumen?.num_proveedores || 0,  color: 'purple', Icon: Users     },
                       { label: 'Ticket Promedio', value: fmt(resumen?.promedio_factura), color: 'amber',  Icon: BarChart2 },
-                    ].map(({ label, value, color, Icon }) => (
-                      <div key={label} className="bg-gray-900 border border-gray-800 p-5 rounded-xl">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="text-gray-400 text-xs font-medium mb-1 truncate">{label}</p>
-                            <p className={`text-xl font-bold text-${color}-400 truncate`}>{value}</p>
-                          </div>
-                          <div className={`bg-${color}-500/10 p-2 rounded-lg text-${color}-500 flex-shrink-0`}>
-                            <Icon size={18} />
+                    ].map(({ label, value, color, Icon }) => {
+                      const c = COLOR_MAP[color] || COLOR_MAP.gray;
+                      return (
+                        <div key={label} className="bg-gray-900 border border-gray-800 p-5 rounded-xl">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-gray-400 text-xs font-medium mb-1 truncate">{label}</p>
+                              <p className={`text-xl font-bold ${c.text} truncate`}>{value}</p>
+                            </div>
+                            <div className={`${c.bg} p-2 rounded-lg ${c.icon} flex-shrink-0`}>
+                              <Icon size={18} />
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   {resumen?.top_proveedor && (
@@ -701,17 +747,20 @@ export default function InteligenciaCompras({ token, onVolver }) {
                             color: variacion > 0 ? 'red' : (variacion < 0 ? 'emerald' : 'gray'),
                             Icon: variacion > 0 ? TrendingUp : TrendingDown,
                           },
-                        ].map(({ label, value, color, Icon }) => (
-                          <div key={label} className="bg-gray-900 border border-gray-800 p-4 rounded-xl">
-                            <div className="flex items-start justify-between gap-2">
-                              <div>
-                                <p className="text-gray-400 text-xs mb-1">{label}</p>
-                                <p className={`text-lg font-bold text-${color}-400`}>{value}</p>
+                        ].map(({ label, value, color, Icon }) => {
+                          const c = COLOR_MAP[color] || COLOR_MAP.gray;
+                          return (
+                            <div key={label} className="bg-gray-900 border border-gray-800 p-4 rounded-xl">
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <p className="text-gray-400 text-xs mb-1">{label}</p>
+                                  <p className={`text-lg font-bold ${c.text}`}>{value}</p>
+                                </div>
+                                <Icon size={16} className={`${c.icon} mt-1 flex-shrink-0`} />
                               </div>
-                              <Icon size={16} className={`text-${color}-500 mt-1 flex-shrink-0`} />
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">

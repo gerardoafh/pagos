@@ -56,6 +56,29 @@ export function extractCFDIData(xmlContent) {
       objetoImp: c.ObjetoImp || ''
     }));
 
+    // Relaciones de Pago (REPs)
+    const relacionados = [];
+    const complementoPagos = comprobante['cfdi:Complemento']?.['pago20:Pagos'] || comprobante['cfdi:Complemento']?.['pago10:Pagos'];
+    
+    if (complementoPagos) {
+      const pagos = complementoPagos['pago20:Pago'] || complementoPagos['pago10:Pago'] || [];
+      const pagosArr = Array.isArray(pagos) ? pagos : [pagos];
+      
+      pagosArr.forEach(pago => {
+        const docs = pago['pago20:DoctoRelacionado'] || pago['pago10:DoctoRelacionado'] || [];
+        const docsArr = Array.isArray(docs) ? docs : [docs];
+        docsArr.forEach(doc => {
+          if (doc && doc.IdDocumento) {
+            relacionados.push({
+              uuid_relacionado: doc.IdDocumento,
+              importe_pagado: parseFloat(doc.ImpPagado || 0),
+              moneda: doc.MonedaDR || 'MXN'
+            });
+          }
+        });
+      });
+    }
+
     return {
       uuid: comprobante['cfdi:Complemento']?.['tfd:TimbreFiscalDigital']?.UUID || null,
       total: parseFloat(comprobante.Total || 0),
@@ -70,13 +93,16 @@ export function extractCFDIData(xmlContent) {
       serie: comprobante.Serie || null,
       rfc_emisor: emisor.Rfc || null,
       nombre_emisor: emisor.Nombre || null,
+      regimen_fiscal_emisor: emisor.RegimenFiscal || null,
+      cp_emisor: comprobante.LugarExpedicion || null,
       rfc_receptor: receptor.Rfc || null,
       nombre_receptor: receptor.Nombre || null,
-      tiene_complemento: !!(comprobante['cfdi:Complemento']?.['pago20:Pagos'] || comprobante['cfdi:Complemento']?.['pago10:Pagos']),
+      tiene_complemento: !!complementoPagos,
       iva,
       iva_retenido,
       isr_retenido,
-      conceptos
+      conceptos,
+      relacionados
     };
   } catch (error) {
     console.error("Error parseando XML:", error.message);

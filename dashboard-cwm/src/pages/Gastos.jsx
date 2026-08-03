@@ -172,8 +172,25 @@ const Gastos = () => {
     document.body.removeChild(link);
   };
 
-  if (loading) return <div className="p-4">Cargando reporte de gastos...</div>;
-  if (error) return <div className="p-4 text-red-500">Error: {error}</div>;
+  if (loading) return (
+    <div className="w-full max-w-[95%] mx-auto flex flex-col items-center justify-center py-32 gap-4 animate-fade-in">
+      <div className="w-8 h-8 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
+      <p className="text-gray-400 text-sm font-medium">Cargando reporte de gastos...</p>
+    </div>
+  );
+  if (error) return (
+    <div className="w-full max-w-[95%] mx-auto py-20 animate-fade-in">
+      <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-6 max-w-lg mx-auto flex items-start gap-4">
+        <div className="bg-red-500/10 p-2.5 rounded-lg text-red-400 flex-shrink-0">
+          <FileSpreadsheet size={20} />
+        </div>
+        <div>
+          <p className="text-red-400 font-semibold mb-1">Error al cargar</p>
+          <p className="text-red-300/70 text-sm">{error}</p>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="w-full max-w-[95%] mx-auto h-full text-gray-200 pb-10">
