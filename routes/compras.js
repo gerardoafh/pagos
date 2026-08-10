@@ -172,7 +172,7 @@ export function registerComprasEndpoints(app, db, authenticateToken) {
         FROM factura_conceptos fc
         JOIN facturas_recibidas f ON fc.uuid_factura = f.uuid
         WHERE f.tipo_comprobante = 'I' AND EXTRACT(YEAR FROM f.fecha_emision) = $1
-        GROUP BY LOWER(fc.descripcion), f.rfc_emisor
+        GROUP BY LOWER(fc.descripcion), f.rfc_emisor, fc.unidad
         ORDER BY num_veces DESC
         LIMIT 50
       `, [anio]);
@@ -195,6 +195,7 @@ export function registerComprasEndpoints(app, db, authenticateToken) {
           SELECT
             fc.descripcion,
             f.nombre_emisor as proveedor,
+            fc.unidad,
             f.fecha_emision,
             CAST(fc.valor_unitario AS NUMERIC) as precio
           FROM factura_conceptos fc
@@ -207,25 +208,28 @@ export function registerComprasEndpoints(app, db, authenticateToken) {
           SELECT
             descripcion,
             proveedor,
+            unidad,
             MIN(fecha_emision) as fecha_min,
             MAX(fecha_emision) as fecha_max,
             COUNT(*) as num_compras
           FROM Historial
-          GROUP BY descripcion, proveedor
+          GROUP BY descripcion, proveedor, unidad
           HAVING COUNT(*) > 1
         ),
         Precios AS (
           SELECT
             a.descripcion,
             a.proveedor,
+            a.unidad,
             a.num_compras,
-            (SELECT precio FROM Historial h WHERE h.descripcion = a.descripcion AND h.proveedor = a.proveedor AND h.fecha_emision = a.fecha_min LIMIT 1) as precio_inicial,
-            (SELECT precio FROM Historial h WHERE h.descripcion = a.descripcion AND h.proveedor = a.proveedor AND h.fecha_emision = a.fecha_max LIMIT 1) as precio_final
+            (SELECT precio FROM Historial h WHERE h.descripcion = a.descripcion AND h.proveedor = a.proveedor AND COALESCE(h.unidad,'') = COALESCE(a.unidad,'') AND h.fecha_emision = a.fecha_min LIMIT 1) as precio_inicial,
+            (SELECT precio FROM Historial h WHERE h.descripcion = a.descripcion AND h.proveedor = a.proveedor AND COALESCE(h.unidad,'') = COALESCE(a.unidad,'') AND h.fecha_emision = a.fecha_max LIMIT 1) as precio_final
           FROM Agrupados a
         )
         SELECT
           descripcion,
           proveedor,
+          unidad,
           num_compras,
           precio_inicial,
           precio_final,
@@ -273,7 +277,7 @@ export function registerComprasEndpoints(app, db, authenticateToken) {
         JOIN facturas_recibidas f ON fc.uuid_factura = f.uuid
         WHERE ${whereF}
           AND fc.descripcion IS NOT NULL
-        GROUP BY LOWER(fc.descripcion), fc.clave_prod_serv
+        GROUP BY LOWER(fc.descripcion), fc.clave_prod_serv, fc.unidad
         ORDER BY importe_total DESC
       `, params);
 

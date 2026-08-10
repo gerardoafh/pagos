@@ -1,9 +1,12 @@
 import React, { useState, useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Search, Building2, CreditCard, Clock, AlertTriangle, FileWarning } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Search, Building2, CreditCard, Clock, AlertTriangle, FileWarning, X, Download } from 'lucide-react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const Pagos = ({ facturas = [] }) => {
   const [busqueda, setBusqueda] = useState('');
   const [paginaActual, setPaginaActual] = useState(1);
+  const [proveedorSeleccionado, setProveedorSeleccionado] = useState(null);
   const itemsPorPagina = 20;
 
   // Aggregate invoices by supplier (proveedor)
@@ -28,7 +31,8 @@ const Pagos = ({ facturas = [] }) => {
           totalPagado: 0,
           facturasPendientes: 0,
           facturasPagadas: 0,
-          fechasPendientes: []
+          fechasPendientes: [],
+          listaFacturasPendientes: []
         };
       }
 
@@ -37,6 +41,7 @@ const Pagos = ({ facturas = [] }) => {
       if (f.estatus === 'pendiente') {
         grupos[rfc].deudaTotal += total;
         grupos[rfc].facturasPendientes += 1;
+        grupos[rfc].listaFacturasPendientes.push(f);
         if (f.fecha_emision) {
           grupos[rfc].fechasPendientes.push(new Date(f.fecha_emision));
         }
@@ -88,8 +93,41 @@ const Pagos = ({ facturas = [] }) => {
     return fecha.toLocaleDateString('es-MX');
   };
 
+  const generarPDF = (proveedor) => {
+    const doc = new jsPDF();
+    const facturas = [...proveedor.listaFacturasPendientes].sort((a,b) => new Date(a.fecha_emision) - new Date(b.fecha_emision));
+
+    doc.setFontSize(20);
+    doc.text('ESTADO DE CUENTA', 14, 22);
+    
+    doc.setFontSize(11);
+    doc.text(`Proveedor: ${proveedor.nombre}`, 14, 32);
+    doc.text(`RFC: ${proveedor.rfc}`, 14, 38);
+    doc.text(`Fecha de Emisión: ${new Date().toLocaleDateString('es-MX')}`, 14, 44);
+    doc.text(`Deuda Total Pendiente: ${formatearMoneda(proveedor.deudaTotal)}`, 14, 50);
+
+    const tableColumn = ["Fecha", "Folio / Serie", "UUID", "Monto"];
+    const tableRows = facturas.map(f => [
+      f.fecha_emision ? new Date(f.fecha_emision).toLocaleDateString('es-MX') : '-',
+      f.folio_interno || '-',
+      f.uuid ? f.uuid.substring(0,8) + '...' : '-',
+      formatearMoneda(Number(f.total) || 0)
+    ]);
+
+    autoTable(doc, {
+      head: [tableColumn],
+      body: tableRows,
+      startY: 56,
+      theme: 'grid',
+      headStyles: { fillColor: [41, 128, 185] },
+      styles: { fontSize: 9 }
+    });
+
+    doc.save(`Estado_de_Cuenta_${proveedor.rfc}.pdf`);
+  };
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
       
       {/* KPIs */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -161,7 +199,7 @@ const Pagos = ({ facturas = [] }) => {
             </thead>
             <tbody className="divide-y divide-gray-800">
               {proveedoresPaginados.map((prov) => (
-                <tr key={prov.rfc} className="hover:bg-gray-800/50 transition-colors">
+                <tr key={prov.rfc} className="hover:bg-gray-800/50 transition-colors cursor-pointer" onClick={() => setProveedorSeleccionado(prov)}>
                   <td className="px-6 py-4">
                     <div className="font-medium text-white">{prov.nombre}</div>
                     <div className="text-xs text-gray-500 mt-1">{prov.rfc}</div>
@@ -239,6 +277,98 @@ const Pagos = ({ facturas = [] }) => {
           </div>
         )}
       </div>
+
+      {/* Modal de Detalle de Proveedor */}
+      {proveedorSeleccionado && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-in fade-in">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between p-6 border-b border-gray-800 bg-gray-950/50">
+              <div>
+                <h2 className="text-xl font-bold text-white">{proveedorSeleccionado.nombre}</h2>
+                <p className="text-gray-400 text-sm mt-1">RFC: {proveedorSeleccionado.rfc}</p>
+              </div>
+              <button 
+                onClick={() => setProveedorSeleccionado(null)}
+                className="p-2 text-gray-500 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 overflow-y-auto flex-1">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div className="bg-gray-950/50 p-4 rounded-xl border border-gray-800">
+                  <p className="text-gray-500 text-xs mb-1 uppercase tracking-wide">Deuda Total</p>
+                  <p className="text-2xl font-bold text-orange-400">{formatearMoneda(proveedorSeleccionado.deudaTotal)}</p>
+                </div>
+                <div className="bg-gray-950/50 p-4 rounded-xl border border-gray-800">
+                  <p className="text-gray-500 text-xs mb-1 uppercase tracking-wide">Facturas Vencidas / Pendientes</p>
+                  <p className="text-2xl font-bold text-white">{proveedorSeleccionado.facturasPendientes}</p>
+                </div>
+              </div>
+
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="text-white font-medium text-lg">Listado de Facturas Pendientes</h3>
+                <button 
+                  onClick={() => generarPDF(proveedorSeleccionado)}
+                  disabled={proveedorSeleccionado.listaFacturasPendientes.length === 0}
+                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                >
+                  <Download size={16} />
+                  Descargar Estado de Cuenta
+                </button>
+              </div>
+
+              {proveedorSeleccionado.listaFacturasPendientes.length > 0 ? (
+                <div className="border border-gray-800 rounded-xl overflow-hidden bg-gray-950/30">
+                  <table className="w-full text-sm text-left">
+                    <thead className="bg-gray-900/50 text-gray-400 text-xs uppercase border-b border-gray-800">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">Fecha Emisión</th>
+                        <th className="px-4 py-3 font-semibold">Folio</th>
+                        <th className="px-4 py-3 font-semibold">UUID</th>
+                        <th className="px-4 py-3 font-semibold text-right">Monto</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                      {[...proveedorSeleccionado.listaFacturasPendientes]
+                        .sort((a,b) => new Date(a.fecha_emision) - new Date(b.fecha_emision))
+                        .map((f, i) => {
+                          const fecha = f.fecha_emision ? new Date(f.fecha_emision) : null;
+                          const diffTime = fecha ? Math.abs(new Date() - fecha) : 0;
+                          const dias = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                          
+                          return (
+                            <tr key={f.uuid || i} className="hover:bg-gray-800/30">
+                              <td className="px-4 py-3 text-gray-300">
+                                {formatearFecha(fecha)}
+                                {dias > 30 && (
+                                  <span className="ml-2 text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded border border-red-500/20">
+                                    {dias}d
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-gray-300">{f.folio_interno || '-'}</td>
+                              <td className="px-4 py-3 text-gray-500 text-xs font-mono">{f.uuid ? f.uuid.substring(0,8) + '...' : '-'}</td>
+                              <td className="px-4 py-3 text-right font-medium text-white">{formatearMoneda(Number(f.total) || 0)}</td>
+                            </tr>
+                          );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500 border border-gray-800 rounded-xl bg-gray-950/30">
+                  No hay facturas pendientes para este proveedor.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

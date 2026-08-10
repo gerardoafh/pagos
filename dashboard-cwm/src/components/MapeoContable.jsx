@@ -1,8 +1,41 @@
-import React, { useState, useEffect } from 'react';
-import { Save, RefreshCw, AlertCircle, CheckCircle2, ChevronLeft, DownloadCloud, FileSpreadsheet, Eye, X } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Save, RefreshCw, AlertCircle, CheckCircle2, ChevronLeft, DownloadCloud, FileSpreadsheet, Eye, X, Zap, Search, ChevronRight } from 'lucide-react';
 import { API_BASE } from '../api.js';
+import { useEmpresa } from '../context/EmpresaContext.jsx';
+
+// ─── Helpers de matching de nombres ─────────────────────────────────────────
+function normalizarNombre(str) {
+  return (str || '')
+    .toUpperCase()
+    .replace(/\b(S\.?A\.?\s*DE\s*C\.?V\.?|S\.?A\.?B\.?|S\.?A\.?|DE\s*C\.?V\.?|S\.?C\.?|R\.?L\.?|DE\s*R\.?L\.?)\b/g, ' ')
+    .replace(/\b(Y|DE|DEL|LOS|LAS|EL|LA|EN|GRUPO|COMERCIALIZADORA|DISTRIBUIDORA|SUMINISTROS|SERVICIOS|PROVEEDOR|PROVEEDORA|INDUSTRIAS|INDUSTRIAL|CONSTRUCTORA|EMPRESA|NACIONAL|NACIONALES|MEXICANA|MEXICO)\b/g, ' ')
+    .replace(/[.,\-/#()&]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function encontrarCuentaPorNombre(nombreProveedor, cuentasPasivo) {
+  const normProv = normalizarNombre(nombreProveedor);
+  const palabrasProv = normProv.split(' ').filter(w => w.length > 2);
+  if (palabrasProv.length === 0) return null;
+
+  let mejorMatch = null;
+  let mejorScore  = 0;
+
+  for (const cuenta of cuentasPasivo) {
+    const normCuenta = normalizarNombre(cuenta.nombre_cuenta);
+    const matching = palabrasProv.filter(w => normCuenta.includes(w));
+    const score = matching.length / palabrasProv.length;
+    if (score > mejorScore && score >= 0.5) {
+      mejorScore  = score;
+      mejorMatch = cuenta;
+    }
+  }
+  return mejorMatch;
+}
 
 export default function MapeoContable({ token, onVolver }) {
+  const { currentEmpresa } = useEmpresa();
   const [proveedores, setProveedores] = useState([]);
   const [cuentas, setCuentas] = useState([]);
   const [mapeos, setMapeos] = useState({});
@@ -19,6 +52,17 @@ export default function MapeoContable({ token, onVolver }) {
   const [polizasJSON, setPolizasJSON] = useState([]);
   const [cargandoPolizas, setCargandoPolizas] = useState(false);
 
+  // Cuentas por defecto para mapeo masivo
+  const [defaultGastoId, setDefaultGastoId] = useState('');
+  const [defaultPasivoId, setDefaultPasivoId] = useState('');
+  const [defaultIvaId, setDefaultIvaId] = useState('');
+  const [guardandoTodos, setGuardandoTodos] = useState(false);
+
+  // Búsqueda y paginación
+  const POR_PAGINA = 50;
+  const [busqueda, setBusqueda] = useState('');
+  const [pagina, setPagina] = useState(1);
+
   const cargarDatos = async () => {
     setCargando(true);
     try {
@@ -30,7 +74,8 @@ export default function MapeoContable({ token, onVolver }) {
       setCuentas(Array.isArray(dataCuentas) ? dataCuentas : []);
 
       // 2. Traer proveedores huérfanos
-      const resProv = await fetch(`${API_BASE}/api/contabilidad/proveedores-sin-mapeo`, {
+      const rfcParam = currentEmpresa ? `?rfc_receptor=${currentEmpresa.rfc}` : '';
+      const resProv = await fetch(`${API_BASE}/api/contabilidad/proveedores-sin-mapeo${rfcParam}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const dataProv = await resProv.json();
@@ -43,8 +88,50 @@ export default function MapeoContable({ token, onVolver }) {
   };
 
   useEffect(() => {
-    if (token) cargarDatos();
-  }, [token]);
+    if (token && currentEmpresa) cargarDatos();
+  }, [token, currentEmpresa]);
+
+  // Auto-detectar cuentas por defecto cuando carga el catálogo
+  useEffect(() => {
+    if (cuentas.length === 0) return;
+    const gastoDefault = cuentas.find(c =>
+      c.tipo_cuenta === 'gasto' && /COMPRA|COSTO|GASTO|SERVICIO/i.test(c.nombre_cuenta)
+    ) || cuentas.find(c => c.tipo_cuenta === 'gasto');
+    const pasivoDefault = cuentas.find(c =>
+      c.tipo_cuenta === 'pasivo' && /PROVEEDOR/i.test(c.nombre_cuenta)
+    ) || cuentas.find(c => c.tipo_cuenta === 'pasivo');
+    const ivaDefault = cuentas.find(c =>
+      c.tipo_cuenta === 'activo' && /IVA|ACREDITABLE/i.test(c.nombre_cuenta)
+    );
+    if (gastoDefault) setDefaultGastoId(prev => prev || String(gastoDefault.id));
+    if (pasivoDefault) setDefaultPasivoId(prev => prev || String(pasivoDefault.id));
+    if (ivaDefault) setDefaultIvaId(prev => prev || String(ivaDefault.id));
+  }, [cuentas]);
+
+  // Pre-llenar todos los mapeos de proveedores con defaults y matching por nombre
+  useEffect(() => {
+    if (proveedores.length === 0 || cuentas.length === 0) return;
+    const ctasP = cuentas.filter(c => c.tipo_cuenta === 'pasivo');
+    setMapeos(prev => {
+      const next = { ...prev };
+      proveedores.forEach(p => {
+        if (next[p.rfc_emisor]) return; // ya tiene mapeo personalizado
+        // 1. Intentar match por nombre en cuentas pasivo
+        const cuentaMatch = encontrarCuentaPorNombre(p.nombre, ctasP);
+        const pasivoId = cuentaMatch
+          ? cuentaMatch.id
+          : (defaultPasivoId ? parseInt(defaultPasivoId, 10) : null);
+        next[p.rfc_emisor] = {
+          cuenta_gasto_id : defaultGastoId ? parseInt(defaultGastoId, 10) : null,
+          cuenta_pasivo_id: pasivoId,
+          cuenta_iva_id   : defaultIvaId ? parseInt(defaultIvaId, 10) : null,
+          _matchPasivo    : !!cuentaMatch,
+          _matchNombre    : cuentaMatch?.nombre_cuenta,
+        };
+      });
+      return next;
+    });
+  }, [proveedores, cuentas, defaultGastoId, defaultPasivoId, defaultIvaId]);
 
   const mostrarNotificacion = (texto, tipo) => {
     setNotificacion({ texto, tipo });
@@ -97,28 +184,60 @@ export default function MapeoContable({ token, onVolver }) {
     }
   };
 
+  // Guardar todos los proveedores con sus cuentas (default o personalizadas)
+  const handleGuardarTodos = async () => {
+    if (!defaultGastoId || !defaultPasivoId) {
+      mostrarNotificacion('Selecciona Gasto y Pasivo por defecto primero.', 'error');
+      return;
+    }
+    setGuardandoTodos(true);
+    let exitosos = 0;
+    for (const prov of proveedores) {
+      const m = mapeos[prov.rfc_emisor] || {};
+      const gastoId  = m.cuenta_gasto_id  || parseInt(defaultGastoId, 10);
+      const pasivoId = m.cuenta_pasivo_id || parseInt(defaultPasivoId, 10);
+      const ivaId    = m.cuenta_iva_id    || (defaultIvaId ? parseInt(defaultIvaId, 10) : null);
+      try {
+        const res = await fetch(`${API_BASE}/api/contabilidad/mapear-proveedor`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ rfc_emisor: prov.rfc_emisor, cuenta_gasto_id: gastoId, cuenta_pasivo_id: pasivoId, cuenta_iva_pendiente_id: ivaId })
+        });
+        if (res.ok) exitosos++;
+      } catch {}
+    }
+    mostrarNotificacion(`${exitosos} de ${proveedores.length} proveedores mapeados correctamente.`, 'exito');
+    setProveedores([]);
+    setGuardandoTodos(false);
+  };
+
   const handleExportar = () => {
-    window.open(`${API_BASE}/api/contabilidad/exportar-contpaqi?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}`, '_blank');
+    if (!currentEmpresa) return;
+    window.open(`${API_BASE}/api/contabilidad/exportar-contpaqi?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}&rfc_receptor=${currentEmpresa.rfc}`, '_blank');
   };
 
   const handleExportarEgresos = () => {
-    window.open(`${API_BASE}/api/contabilidad/exportar-egresos?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}`, '_blank');
+    if (!currentEmpresa) return;
+    window.open(`${API_BASE}/api/contabilidad/exportar-egresos?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}&rfc_receptor=${currentEmpresa.rfc}`, '_blank');
   };
 
   const handleExportarDIOT = () => {
-    window.open(`${API_BASE}/api/contabilidad/exportar-diot?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}`, '_blank');
+    if (!currentEmpresa) return;
+    window.open(`${API_BASE}/api/contabilidad/exportar-diot?anio=${anio}&mes=${mes}&dia=${dia}&token=${token}&rfc_receptor=${currentEmpresa.rfc}`, '_blank');
   };
 
   const handlePrevisualizarPolizas = async () => {
+    if (!currentEmpresa) return;
     setCargandoPolizas(true);
     setMostrarModalPolizas(true);
     try {
-      const res = await fetch(`${API_BASE}/api/contabilidad/polizas.json?anio=${anio}&mes=${mes}&dia=${dia}`, {
+      const res = await fetch(`${API_BASE}/api/contabilidad/polizas.json?anio=${anio}&mes=${mes}&dia=${dia}&rfc_receptor=${currentEmpresa.rfc}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
         const data = await res.json();
-        setPolizasJSON(data);
+        // La API devuelve { success: true, polizas: [...] } 
+        setPolizasJSON(Array.isArray(data) ? data : (data.polizas || []));
       } else {
         mostrarNotificacion('Error al obtener pólizas', 'error');
         setMostrarModalPolizas(false);
@@ -132,9 +251,93 @@ export default function MapeoContable({ token, onVolver }) {
   };
 
   // Filtrar cuentas por tipo para llenar los selects
-  const ctasGasto = cuentas.filter(c => c.tipo_cuenta === 'gasto');
+  const ctasGasto  = cuentas.filter(c => c.tipo_cuenta === 'gasto');
   const ctasPasivo = cuentas.filter(c => c.tipo_cuenta === 'pasivo');
-  const ctasActivo = cuentas.filter(c => c.tipo_cuenta === 'activo'); // Para el IVA
+  const ctasActivo = cuentas.filter(c => c.tipo_cuenta === 'activo');
+
+  // Proveedores filtrados por búsqueda y paginados
+  const proveedoresFiltrados = useMemo(() => {
+    const q = busqueda.toLowerCase().trim();
+    if (!q) return proveedores;
+    return proveedores.filter(p =>
+      p.nombre.toLowerCase().includes(q) ||
+      p.rfc_emisor.toLowerCase().includes(q)
+    );
+  }, [proveedores, busqueda]);
+
+  const totalPaginas    = Math.max(1, Math.ceil(proveedoresFiltrados.length / POR_PAGINA));
+  const paginaSegura    = Math.min(pagina, totalPaginas);
+  const proveedoresPag  = proveedoresFiltrados.slice((paginaSegura - 1) * POR_PAGINA, paginaSegura * POR_PAGINA);
+
+  if (mostrarModalPolizas) {
+    return (
+      <div className="max-w-7xl mx-auto space-y-6">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow-sm flex flex-col h-auto min-h-[600px]">
+          <div className="p-5 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
+            <h3 className="text-xl font-bold text-white flex items-center gap-2">
+              <Eye className="text-blue-400" /> Previsualización de Pólizas
+            </h3>
+            <button 
+              onClick={() => setMostrarModalPolizas(false)} 
+              className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg font-medium transition-colors text-sm"
+            >
+              <ChevronLeft size={16} /> Volver
+            </button>
+          </div>
+          
+          <div className="p-5 flex-1 bg-gray-950">
+            {cargandoPolizas ? (
+              <div className="flex flex-col items-center justify-center py-20 text-blue-400">
+                <RefreshCw className="animate-spin mb-4" size={32} />
+                <p>Generando pólizas...</p>
+              </div>
+            ) : polizasJSON.length === 0 ? (
+              <div className="text-center py-20 text-gray-400 bg-gray-900/50 rounded-xl border border-gray-800">
+                <p>No se generaron pólizas para el filtro seleccionado.</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {polizasJSON.map((poliza, idx) => (
+                  <div key={idx} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow">
+                    <div className="bg-gray-800/50 px-4 py-3 flex justify-between items-center">
+                      <div>
+                        <p className="text-white font-bold text-sm">Póliza {poliza.tipo || 'Diario'} #{idx + 1}</p>
+                        <p className="text-gray-400 text-xs mt-1">{poliza.fecha} | {poliza.concepto}</p>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead className="bg-gray-950 text-gray-400">
+                          <tr>
+                            <th className="px-4 py-2 font-medium w-32">Cuenta</th>
+                            <th className="px-4 py-2 font-medium">Concepto Movimiento</th>
+                            <th className="px-4 py-2 font-medium text-right w-32">Cargo</th>
+                            <th className="px-4 py-2 font-medium text-right w-32">Abono</th>
+                            <th className="px-4 py-2 font-medium w-48">Referencia</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800">
+                          {poliza.movimientos.map((mov, midx) => (
+                            <tr key={midx} className="hover:bg-gray-800/30">
+                              <td className="px-4 py-2 text-gray-300 font-mono">{mov.cuenta}</td>
+                              <td className="px-4 py-2 text-gray-300 truncate max-w-xs">{mov.concepto}</td>
+                              <td className="px-4 py-2 text-blue-400 text-right">{mov.tipo_movimiento === 'Cargo' ? `$${parseFloat(mov.importe).toFixed(2)}` : ''}</td>
+                              <td className="px-4 py-2 text-emerald-400 text-right">{mov.tipo_movimiento === 'Abono' ? `$${parseFloat(mov.importe).toFixed(2)}` : ''}</td>
+                              <td className="px-4 py-2 text-gray-500 font-mono">{mov.referencia}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -197,8 +400,70 @@ export default function MapeoContable({ token, onVolver }) {
 
       {/* Tabla de Proveedores */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow-sm">
-        <div className="p-4 border-b border-gray-800 bg-gray-950/50">
-          <h3 className="text-lg font-medium text-white flex items-center gap-2">⚠️ Proveedores Huérfanos Pendientes de Mapeo</h3>
+        <div className="p-4 border-b border-gray-800 bg-gray-950/50 space-y-3">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <h3 className="text-lg font-medium text-white flex items-center gap-2">⚠️ Proveedores Huérfanos Pendientes de Mapeo
+              <span className="text-xs text-gray-500 font-normal">
+                {busqueda ? `${proveedoresFiltrados.length} de ${proveedores.length}` : proveedores.length}
+              </span>
+            </h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Buscador */}
+              {proveedores.length > 0 && (
+                <div className="relative">
+                  <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+                  <input
+                    type="text"
+                    placeholder="Buscar proveedor o RFC..."
+                    value={busqueda}
+                    onChange={e => { setBusqueda(e.target.value); setPagina(1); }}
+                    className="pl-7 pr-3 py-1.5 bg-gray-800 border border-gray-600 text-gray-200 text-xs rounded-lg w-52 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              )}
+              {proveedoresFiltrados.length > 0 && (
+                <button
+                  onClick={handleGuardarTodos}
+                  disabled={guardandoTodos || !defaultGastoId || !defaultPasivoId}
+                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-semibold text-sm transition-colors shadow-lg"
+                >
+                  {guardandoTodos ? <RefreshCw size={15} className="animate-spin" /> : <Zap size={15} />}
+                  {guardandoTodos ? 'Guardando...' : `Guardar Todos (${proveedoresFiltrados.length})`}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Panel de cuentas por defecto */}
+          {proveedores.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 p-3 bg-gray-900 rounded-lg border border-gray-700">
+              <span className="text-xs text-gray-400 font-medium shrink-0">⚡ Defaults:</span>
+              <select
+                className="flex-1 min-w-[200px] bg-gray-800 border border-gray-600 text-gray-200 text-xs rounded-lg p-2 focus:border-emerald-500"
+                value={defaultGastoId}
+                onChange={e => { setDefaultGastoId(e.target.value); }}
+              >
+                <option value="">Gasto por defecto...</option>
+                {ctasGasto.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} – {c.nombre_cuenta}</option>)}
+              </select>
+              <select
+                className="flex-1 min-w-[200px] bg-gray-800 border border-gray-600 text-gray-200 text-xs rounded-lg p-2 focus:border-emerald-500"
+                value={defaultPasivoId}
+                onChange={e => { setDefaultPasivoId(e.target.value); }}
+              >
+                <option value="">Pasivo por defecto...</option>
+                {ctasPasivo.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} – {c.nombre_cuenta}</option>)}
+              </select>
+              <select
+                className="flex-1 min-w-[160px] bg-gray-800 border border-gray-600 text-gray-200 text-xs rounded-lg p-2 focus:border-emerald-500"
+                value={defaultIvaId}
+                onChange={e => { setDefaultIvaId(e.target.value); }}
+              >
+                <option value="">IVA / Ninguno</option>
+                {ctasActivo.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} – {c.nombre_cuenta}</option>)}
+              </select>
+            </div>
+          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm whitespace-nowrap">
@@ -219,8 +484,8 @@ export default function MapeoContable({ token, onVolver }) {
                     Cargando catálogo y proveedores...
                   </td>
                 </tr>
-              ) : proveedores.length > 0 ? (
-                proveedores.map((prov) => (
+              ) : proveedoresFiltrados.length > 0 ? (
+                proveedoresPag.map((prov) => (
                   <tr key={prov.rfc_emisor} className="hover:bg-gray-800/50 transition-colors">
                     <td className="px-6 py-4">
                       <div className="font-medium text-gray-200">{prov.nombre}</div>
@@ -229,10 +494,10 @@ export default function MapeoContable({ token, onVolver }) {
                     
                     {/* Select Gasto */}
                     <td className="px-6 py-4">
-                      <select 
+                      <select
                         className="w-full bg-gray-950 border border-gray-700 text-gray-300 text-sm rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 p-2"
+                        value={mapeos[prov.rfc_emisor]?.cuenta_gasto_id || ''}
                         onChange={(e) => handleSelectChange(prov.rfc_emisor, 'cuenta_gasto_id', e.target.value)}
-                        defaultValue=""
                       >
                         <option value="" disabled>Selecciona gasto...</option>
                         {ctasGasto.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} - {c.nombre_cuenta}</option>)}
@@ -241,22 +506,30 @@ export default function MapeoContable({ token, onVolver }) {
 
                     {/* Select Pasivo */}
                     <td className="px-6 py-4">
-                      <select 
-                        className="w-full bg-gray-950 border border-gray-700 text-gray-300 text-sm rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 p-2"
-                        onChange={(e) => handleSelectChange(prov.rfc_emisor, 'cuenta_pasivo_id', e.target.value)}
-                        defaultValue=""
-                      >
-                        <option value="" disabled>Selecciona pasivo...</option>
-                        {ctasPasivo.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} - {c.nombre_cuenta}</option>)}
-                      </select>
+                      <div className="space-y-1">
+                        {mapeos[prov.rfc_emisor]?._matchPasivo && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">✓ auto</span>
+                            <span className="text-[10px] text-gray-500 truncate max-w-[180px]" title={mapeos[prov.rfc_emisor]._matchNombre}>{mapeos[prov.rfc_emisor]._matchNombre}</span>
+                          </div>
+                        )}
+                        <select
+                          className="w-full bg-gray-950 border border-gray-700 text-gray-300 text-sm rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 p-2"
+                          value={mapeos[prov.rfc_emisor]?.cuenta_pasivo_id || ''}
+                          onChange={(e) => handleSelectChange(prov.rfc_emisor, 'cuenta_pasivo_id', e.target.value)}
+                        >
+                          <option value="" disabled>Selecciona pasivo...</option>
+                          {ctasPasivo.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} - {c.nombre_cuenta}</option>)}
+                        </select>
+                      </div>
                     </td>
 
                     {/* Select IVA */}
                     <td className="px-6 py-4">
-                      <select 
+                      <select
                         className="w-full bg-gray-950 border border-gray-700 text-gray-300 text-sm rounded-lg focus:border-blue-500 focus:ring-1 focus:ring-blue-500 p-2"
+                        value={mapeos[prov.rfc_emisor]?.cuenta_iva_id || ''}
                         onChange={(e) => handleSelectChange(prov.rfc_emisor, 'cuenta_iva_id', e.target.value)}
-                        defaultValue=""
                       >
                         <option value="">Ninguno / Exento</option>
                         {ctasActivo.map(c => <option key={c.id} value={c.id}>{c.codigo_cuenta} - {c.nombre_cuenta}</option>)}
@@ -285,82 +558,57 @@ export default function MapeoContable({ token, onVolver }) {
             </tbody>
           </table>
         </div>
-      </div>
 
-      {/* Modal Previsualizar Pólizas */}
-      {mostrarModalPolizas && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-6xl max-h-[90vh] flex flex-col shadow-2xl">
-            <div className="p-5 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
-              <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                <Eye className="text-blue-400" /> Previsualización de Pólizas (Diario)
-              </h3>
-              <button onClick={() => setMostrarModalPolizas(false)} className="text-gray-400 hover:text-white">
-                <X size={24} />
-              </button>
-            </div>
-            
-            <div className="p-5 overflow-y-auto flex-1 bg-gray-950">
-              {cargandoPolizas ? (
-                <div className="flex flex-col items-center justify-center py-20 text-blue-400">
-                  <RefreshCw className="animate-spin mb-4" size={32} />
-                  <p>Generando pólizas...</p>
-                </div>
-              ) : polizasJSON.length === 0 ? (
-                <div className="text-center py-20 text-gray-400">
-                  <p>No se generaron pólizas para el filtro seleccionado.</p>
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  {polizasJSON.map((poliza, idx) => (
-                    <div key={idx} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow">
-                      <div className="bg-gray-800/50 px-4 py-3 flex justify-between items-center">
-                        <div>
-                          <p className="text-white font-bold text-sm">Póliza {poliza.tipo_poliza} - #{poliza.numero_poliza}</p>
-                          <p className="text-gray-400 text-xs mt-1">{poliza.fecha} | {poliza.concepto}</p>
-                        </div>
-                      </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs text-left">
-                          <thead className="bg-gray-950 text-gray-400">
-                            <tr>
-                              <th className="px-4 py-2 font-medium w-32">Cuenta</th>
-                              <th className="px-4 py-2 font-medium">Concepto Movimiento</th>
-                              <th className="px-4 py-2 font-medium text-right w-32">Cargo</th>
-                              <th className="px-4 py-2 font-medium text-right w-32">Abono</th>
-                              <th className="px-4 py-2 font-medium w-48">Referencia</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-800">
-                            {poliza.movimientos.map((mov, midx) => (
-                              <tr key={midx} className="hover:bg-gray-800/30">
-                                <td className="px-4 py-2 text-gray-300 font-mono">{mov.cuenta}</td>
-                                <td className="px-4 py-2 text-gray-300 truncate max-w-xs">{mov.concepto}</td>
-                                <td className="px-4 py-2 text-blue-400 text-right">{mov.tipo_mov === 'cargo' ? `$${parseFloat(mov.importe).toFixed(2)}` : ''}</td>
-                                <td className="px-4 py-2 text-emerald-400 text-right">{mov.tipo_mov === 'abono' ? `$${parseFloat(mov.importe).toFixed(2)}` : ''}</td>
-                                <td className="px-4 py-2 text-gray-500 font-mono">{mov.referencia}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            
-            <div className="p-4 border-t border-gray-800 flex justify-end bg-gray-900/50">
-              <button 
-                onClick={() => setMostrarModalPolizas(false)}
-                className="bg-gray-800 hover:bg-gray-700 text-white px-5 py-2 rounded-lg font-medium transition-colors"
+        {/* Controles de paginación */}
+        {!cargando && proveedoresFiltrados.length > POR_PAGINA && (
+          <div className="flex items-center justify-between px-6 py-3 border-t border-gray-800 bg-gray-950/30">
+            <span className="text-xs text-gray-500">
+              Mostrando {(paginaSegura - 1) * POR_PAGINA + 1}–{Math.min(paginaSegura * POR_PAGINA, proveedoresFiltrados.length)} de {proveedoresFiltrados.length} proveedores
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPagina(p => Math.max(1, p - 1))}
+                disabled={paginaSegura === 1}
+                className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-gray-300 transition-colors"
               >
-                Cerrar
+                <ChevronLeft size={16} />
+              </button>
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
+                .filter(n => n === 1 || n === totalPaginas || Math.abs(n - paginaSegura) <= 2)
+                .reduce((acc, n, idx, arr) => {
+                  if (idx > 0 && n - arr[idx - 1] > 1) acc.push('...');
+                  acc.push(n);
+                  return acc;
+                }, [])
+                .map((item, idx) =>
+                  item === '...' ? (
+                    <span key={`e-${idx}`} className="text-gray-500 text-xs px-1">…</span>
+                  ) : (
+                    <button
+                      key={item}
+                      onClick={() => setPagina(item)}
+                      className={`w-7 h-7 text-xs rounded-lg font-medium transition-colors ${
+                        item === paginaSegura
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                      }`}
+                    >
+                      {item}
+                    </button>
+                  )
+                )
+              }
+              <button
+                onClick={() => setPagina(p => Math.min(totalPaginas, p + 1))}
+                disabled={paginaSegura === totalPaginas}
+                className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-gray-300 transition-colors"
+              >
+                <ChevronRight size={16} />
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

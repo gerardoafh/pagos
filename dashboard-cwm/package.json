@@ -11,12 +11,15 @@
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.3.0",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
     "lucide-react": "^1.16.0",
     "multer": "^2.1.1",
     "qrcode.react": "^4.0.1",
     "react": "^19.2.6",
     "react-image-crop": "^11.0.5",
     "react-dom": "^19.2.6",
+    "react-router-dom": "^6.22.3",
     "recharts": "^3.10.1",
     "socket.io-client": "^4.8.3"
   },

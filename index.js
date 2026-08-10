@@ -32,14 +32,32 @@ async function iniciarMotor() {
     await db.connect();
     console.log("✅ Conexión a Postgres exitosa.");
 
-    const rutaCer = path.join('credenciales', process.env.FIEL_CER_NAME);
-    const rutaKey = path.join('credenciales', process.env.FIEL_KEY_NAME);
+    const rfcArgument = process.argv[2];
+    if (!rfcArgument) {
+      console.error("❌ Falta el parámetro RFC de la empresa");
+      process.exit(1);
+    }
 
-    console.log("Cargando credenciales FIEL...");
+    const empresaData = await db.query('SELECT fiel_cer_path, fiel_key_path, fiel_password FROM empresas WHERE rfc = $1', [rfcArgument]);
+    if (empresaData.rows.length === 0) {
+      console.error(`❌ Empresa con RFC ${rfcArgument} no encontrada en la BD.`);
+      process.exit(1);
+    }
+
+    const { fiel_cer_path, fiel_key_path, fiel_password } = empresaData.rows[0];
+    if (!fiel_cer_path || !fiel_key_path || !fiel_password) {
+      console.error(`❌ La empresa ${rfcArgument} no tiene configurada su FIEL.`);
+      process.exit(1);
+    }
+
+    const rutaCer = fiel_cer_path;
+    const rutaKey = fiel_key_path;
+
+    console.log(`Cargando credenciales FIEL para ${rfcArgument}...`);
     const fiel = Fiel.create(
       readFileSync(rutaCer, 'binary'),
       readFileSync(rutaKey, 'binary'),
-      process.env.FIEL_PASSWORD
+      fiel_password
     );
 
     if (!fiel.isValid()) {
@@ -53,10 +71,10 @@ async function iniciarMotor() {
     const service = new Service(requestBuilder, webClient);
     console.log("✅ Servicio SAT inicializado. Motor listo en Windows.");
 
-    // Leer parámetros de consola
-    const argInicio = process.argv[2];
-    const argFin = process.argv[3];
-    const argEstatus = process.argv[4] || 'active'; // 'active' o 'cancelled'
+    // Leer parámetros de consola (el 2 ya es rfcArgument)
+    const argInicio = process.argv[3];
+    const argFin = process.argv[4];
+    const argEstatus = process.argv[5] || 'active'; // 'active' o 'cancelled'
 
     let fechaInicioStr = '';
     let fechaFinStr = '';
@@ -97,7 +115,13 @@ async function iniciarMotor() {
     }
 
     const requestId = query.getRequestId();
-    writeFileSync('last_request.json', JSON.stringify({ requestId, action: argEstatus }, null, 2));
+    writeFileSync(`last_request_${rfcArgument}.json`, JSON.stringify({ requestId, action: argEstatus, rfc: rfcArgument }, null, 2));
+    
+    // Guardar también en la base de datos (compartida entre contenedores Docker)
+    await db.query(
+      `INSERT INTO sat_solicitudes (rfc, request_id, action) VALUES ($1, $2, $3)`,
+      [rfcArgument, requestId, argEstatus]
+    );
     
     console.log(`\n🚀 ¡Solicitud anual aceptada con éxito por el SAT!`);
     console.log(`================================================================`);

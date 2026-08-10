@@ -22,7 +22,7 @@ const nasWorker = new Worker('nasQueue', async (job) => {
       else reject(new Error(`Trabajo ${job.name} falló con código ${code}`));
     });
   });
-}, { connection, concurrency: 1 });
+}, { connection, concurrency: 1, lockDuration: 300000 });
 
 const aiWorker = new Worker('aiQueue', async (job) => {
   console.log(`[Worker AI] Iniciando trabajo ${job.name}`);
@@ -32,7 +32,7 @@ const aiWorker = new Worker('aiQueue', async (job) => {
     return 'Clasificación contable y detección de anomalías exitosas';
   }
   return 'Trabajo desconocido';
-}, { connection, concurrency: 1 });
+}, { connection, concurrency: 1, lockDuration: 300000 });
 
 nasWorker.on('failed', (job, err) => console.error(`[Worker NAS] Trabajo ${job.id} falló:`, err));
 aiWorker.on('failed', (job, err) => console.error(`[Worker AI] Trabajo ${job.id} falló:`, err));

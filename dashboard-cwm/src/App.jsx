@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { useEmpresa } from './context/EmpresaContext.jsx';
 import { API_BASE, SOCKET_URL } from './api.js';
 import { io } from 'socket.io-client';
 
@@ -15,6 +17,8 @@ import Conciliacion from './pages/Conciliacion.jsx';
 import Layout from './components/Layout.jsx';
 import DashboardPrincipal from './pages/DashboardPrincipal.jsx';
 import MobileUpload from './pages/MobileUpload.jsx';
+import ConfiguradorEmpresa from './pages/ConfiguradorEmpresa.jsx';
+import UsuariosYPerfiles from './pages/UsuariosYPerfiles.jsx';
 import { DownloadCloud, X } from 'lucide-react';
 
 // ─── Toast Notification Component ──────────────────────────────────────────
@@ -41,8 +45,10 @@ function Toast({ toasts, removeToast }) {
 }
 
 export default function App() {
+  const { currentEmpresa } = useEmpresa();
   const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [currentHash, setCurrentHash] = useState(window.location.hash.replace('#', ''));
+  const navigate = useNavigate();
+  const location = useLocation();
   const [facturas, setFacturas] = useState([]);
   const [cargando, setCargando] = useState(true);
 
@@ -61,15 +67,7 @@ export default function App() {
   const [satFechaFin, setSatFechaFin] = useState('');
   const [satAccion, setSatAccion] = useState('active');
 
-  // Router listener
-  useEffect(() => {
-    const syncStateWithHash = () => {
-      setCurrentHash(window.location.hash.replace('#', ''));
-    };
-    window.addEventListener('hashchange', syncStateWithHash);
-    syncStateWithHash(); 
-    return () => window.removeEventListener('hashchange', syncStateWithHash);
-  }, []);
+
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -77,11 +75,14 @@ export default function App() {
   };
 
   const cargarFacturas = async () => {
-    if (!token) return;
+    if (!token || !currentEmpresa) return;
     setCargando(true);
     try {
       const respuesta = await fetch(`${API_BASE}/api/facturas`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'x-empresa-rfc': currentEmpresa.rfc
+        }
       });
       if (respuesta.status === 401 || respuesta.status === 403) {
         handleLogout();
@@ -99,8 +100,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    cargarFacturas();
-  }, [token]);
+    if (token && currentEmpresa) {
+      cargarFacturas();
+    }
+  }, [token, currentEmpresa]);
 
   // WebSockets
   useEffect(() => {
@@ -132,12 +135,16 @@ export default function App() {
   };
 
   const conciliarXML = async () => {
+    if (!currentEmpresa) return;
     try {
-      const respuesta = await fetch(`${API_BASE}/api/conciliar-xml`, { 
+      const res = await fetch(`${API_BASE}/api/verificar`, { 
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'x-empresa-rfc': currentEmpresa.rfc
+        }
       });
-      const data = await respuesta.json();
+      const data = await res.json();
       toast(data.mensaje || 'Lectura de XMLs iniciada. Recibirás una notificación al terminar.', 'success');
     } catch (error) {
       toast('No se pudo conectar con el servidor API.', 'error');
@@ -145,14 +152,22 @@ export default function App() {
   };
 
   const sincronizarSAT = async () => {
-    if (!satFechaInicio || !satFechaFin) return alert("Por favor selecciona las fechas.");
+    if (!satFechaInicio || !satFechaFin) {
+      toast('Selecciona ambas fechas', 'error');
+      return;
+    }
+    if (!currentEmpresa) {
+      toast('Selecciona una empresa primero', 'error');
+      return;
+    }
     setMostrarModalSAT(false);
     try {
       const respuesta = await fetch(`${API_BASE}/api/sat/sync`, { 
         method: 'POST',
         headers: { 
           'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'x-empresa-rfc': currentEmpresa.rfc
         },
         body: JSON.stringify({ fechaInicio: satFechaInicio, fechaFin: satFechaFin, estatus: satAccion })
       });
@@ -164,50 +179,46 @@ export default function App() {
   };
 
   // Mobile Upload via QR (No requiere login)
-  if (currentHash.startsWith('mobile-upload/')) {
-    const sessionId = currentHash.split('/')[1];
+  if (location.pathname.startsWith('/mobile-upload/')) {
+    const sessionId = location.pathname.split('/')[2];
     return <MobileUpload sessionId={sessionId} />;
   }
 
   // Login
   if (!token) return <Login setAuthToken={setToken} />;
 
-  // Router Content
-  const renderContent = () => {
-    switch (currentHash) {
-      case 'gastos': return <Gastos />;
-      case 'pagos': return <Pagos facturas={facturas} />;
-      case 'conciliacion': return <Conciliacion token={token} />;
-      case 'compras': return <ReporteConceptos token={token} onVolver={() => window.location.hash = ''} />;
-      case 'contabilidad': return <MapeoContable token={token} onVolver={() => window.location.hash = ''} />;
-      case 'reps-huerfanos': return <RepsHuerfanos token={token} />;
-      case 'logs': return <LogPanel visible={true} onClose={() => window.location.hash = ''} inline={true} />;
-      case 'auditoria': return <AuditLogs token={token} />;
-      case 'config': return <Configuracion token={token} />;
-      default:
-        return (
-          <DashboardPrincipal
-            facturas={facturas}
-            cargarFacturas={cargarFacturas}
-            cargando={cargando}
-            setCargando={setCargando}
-            token={token}
-            toast={toast}
-            API_BASE={API_BASE}
-            forzarEscaneo={forzarEscaneo}
-            conciliarXML={conciliarXML}
-            setMostrarModalSAT={setMostrarModalSAT}
-          />
-        );
-    }
-  };
-
   return (
     <>
       <Toast toasts={toasts} removeToast={removeToast} />
       
-      <Layout currentHash={currentHash} handleLogout={handleLogout}>
-        {renderContent()}
+      <Layout handleLogout={handleLogout}>
+        <Routes>
+          <Route path="/" element={
+            <DashboardPrincipal
+              facturas={facturas}
+              cargarFacturas={cargarFacturas}
+              cargando={cargando}
+              setCargando={setCargando}
+              token={token}
+              toast={toast}
+              API_BASE={API_BASE}
+              forzarEscaneo={forzarEscaneo}
+              conciliarXML={conciliarXML}
+              setMostrarModalSAT={setMostrarModalSAT}
+            />
+          } />
+          <Route path="/gastos" element={<Gastos />} />
+          <Route path="/pagos" element={<Pagos facturas={facturas} />} />
+          <Route path="/conciliacion" element={<Conciliacion token={token} />} />
+          <Route path="/compras" element={<ReporteConceptos token={token} onVolver={() => navigate('/')} />} />
+          <Route path="/contabilidad" element={<MapeoContable token={token} onVolver={() => navigate('/')} />} />
+          <Route path="/reps-huerfanos" element={<RepsHuerfanos token={token} />} />
+          <Route path="/logs" element={<LogPanel visible={true} onClose={() => navigate('/')} inline={true} />} />
+          <Route path="/auditoria" element={<AuditLogs token={token} />} />
+          <Route path="/config" element={<Configuracion token={token} />} />
+          <Route path="/usuarios" element={<UsuariosYPerfiles token={token} />} />
+          <Route path="/config-empresa" element={<ConfiguradorEmpresa token={token} />} />
+        </Routes>
       </Layout>
 
       {/* Modal Descarga SAT */}

@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { TrendingUp, Activity } from 'lucide-react';
-
-const API_BASE = 'http://localhost:3000';
+import { API_BASE } from '../api.js';
 
 export default function CashFlowChart({ token, currentEmpresa = 'Todas' }) {
   const [data, setData] = useState([]);

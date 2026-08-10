@@ -11,6 +11,8 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend
 } from 'recharts';
+import { useEmpresa } from '../context/EmpresaContext.jsx';
+import VisorFactura from './VisorFactura.jsx';
 
 // ─── Constantes de diseño ──────────────────────────────────────────────────
 const PALETTE = [
@@ -87,6 +89,7 @@ const PieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
 
 // ─── Componente principal ──────────────────────────────────────────────────
 export default function InteligenciaCompras({ token, onVolver }) {
+  const { currentEmpresa } = useEmpresa();
   const [tab,    setTab]    = useState('resumen');
   const [anio,   setAnio]   = useState(new Date().getFullYear().toString());
   const [mes,    setMes]    = useState('todos');
@@ -102,6 +105,8 @@ export default function InteligenciaCompras({ token, onVolver }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const dropdownRef = useRef(null);
   
+  const [unidadSeleccionada, setUnidadSeleccionada] = useState('Todas');
+  
   // Estado para Detalle de Proveedor
   const [proveedorSeleccionado, setProveedorSeleccionado] = useState(null);
   const [detalleProveedor, setDetalleProveedor] = useState([]);
@@ -114,6 +119,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
   const [resultados,     setResultados]     = useState([]);
   const [buscando,       setBuscando]       = useState(false);
   const [facturaDetalle, setFacturaDetalle] = useState(null);
+  const [visorUuid, setVisorUuid] = useState(null);
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -129,16 +135,17 @@ export default function InteligenciaCompras({ token, onVolver }) {
 
   // ── Fetch de datos globales ─────────────────────────────────────────────
   const cargar = useCallback(async () => {
+    if (!currentEmpresa) return;
     setCargando(true);
     try {
-      const p = `anio=${anio}${mes !== 'todos' ? `&mes=${mes}` : ''}`;
+      const p = `anio=${anio}${mes !== 'todos' ? `&mes=${mes}` : ''}&rfc_receptor=${currentEmpresa.rfc}`;
       const [r1, r2, r3, r4, r5, r6] = await Promise.all([
         fetch(`${API_BASE}/api/compras/resumen?${p}`,       { headers }),
-        fetch(`${API_BASE}/api/compras/por-mes?anio=${anio}`, { headers }),
+        fetch(`${API_BASE}/api/compras/por-mes?anio=${anio}&rfc_receptor=${currentEmpresa.rfc}`, { headers }),
         fetch(`${API_BASE}/api/compras/por-proveedor?${p}`, { headers }),
         fetch(`${API_BASE}/api/compras/por-clave-sat?${p}`, { headers }),
-        fetch(`${API_BASE}/api/compras/sugerencias?anio=${anio}`, { headers }),
-        fetch(`${API_BASE}/api/compras/alertas-precio?anio=${anio}`, { headers }),
+        fetch(`${API_BASE}/api/compras/sugerencias?anio=${anio}&rfc_receptor=${currentEmpresa.rfc}`, { headers }),
+        fetch(`${API_BASE}/api/compras/alertas-precio?anio=${anio}&rfc_receptor=${currentEmpresa.rfc}`, { headers }),
       ]);
       const [d1, d2, d3, d4, d5, d6] = await Promise.all([r1.json(), r2.json(), r3.json(), r4.json(), r5.json(), r6.json()]);
       
@@ -153,7 +160,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
     } finally {
       setCargando(false);
     }
-  }, [anio, mes, token]);
+  }, [anio, mes, token, currentEmpresa]);
 
   useEffect(() => { cargar(); }, [cargar]);
 
@@ -179,7 +186,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
     setProveedorSeleccionado(nombre);
     setCargandoDetalle(true);
     try {
-      const p = `anio=${anio}${mes !== 'todos' ? `&mes=${mes}` : ''}&proveedor=${encodeURIComponent(nombre)}`;
+      const p = `anio=${anio}${mes !== 'todos' ? `&mes=${mes}` : ''}&proveedor=${encodeURIComponent(nombre)}&rfc_receptor=${currentEmpresa.rfc}`;
       const res = await fetch(`${API_BASE}/api/compras/proveedor-detalle?${p}`, { headers });
       setDetalleProveedor(await res.json());
     } catch (e) {
@@ -195,8 +202,9 @@ export default function InteligenciaCompras({ token, onVolver }) {
     setBuscando(true);
     setShowDropdown(false);
     setQuery(termToSearch);
+    if (!currentEmpresa) return;
     try {
-      const r = await fetch(`${API_BASE}/api/conceptos/buscar?q=${encodeURIComponent(termToSearch)}`, { headers });
+      const r = await fetch(`${API_BASE}/api/conceptos/buscar?q=${encodeURIComponent(termToSearch)}&rfc_receptor=${currentEmpresa.rfc}`, { headers });
       setResultados(await r.json());
     } catch (err) {
       console.error('Error buscando:', err);
@@ -208,6 +216,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
   const verTendenciaProducto = (descripcion) => {
     setProveedorSeleccionado(null);
     setTab('tendencias');
+    setUnidadSeleccionada('Todas');
     buscar(descripcion);
   };
 
@@ -216,14 +225,37 @@ export default function InteligenciaCompras({ token, onVolver }) {
     s.proveedor?.toLowerCase().includes(query.toLowerCase())
   ).slice(0, 8);
 
-  const chartTend = resultados.reduce((acc, r) => {
-    if (!acc.find(x => x.fecha === r.fecha_emision && x.proveedor === r.proveedor)) {
-      acc.push({ fecha: r.fecha_emision, precio: parseFloat(r.valor_unitario), proveedor: r.proveedor, raw: r });
-    }
-    return acc;
-  }, []);
+  // Obtener unidades únicas para el selector
+  const unidadesUnicas = ['Todas', ...new Set(resultados.map(r => r.unidad || 'N/A'))].filter(Boolean);
 
-  const preciosArr = chartTend.map(d => d.precio);
+  const chartDataMap = {};
+  const seriesNames = new Set();
+  const rawMap = {};
+
+  resultados
+    .filter(r => unidadSeleccionada === 'Todas' || (r.unidad || 'N/A') === unidadSeleccionada)
+    .forEach(r => {
+      const fecha = r.fecha_emision;
+      const unidad = r.unidad || 'N/A';
+      // Si eligen "Todas", separamos las lineas por Unidad. Si eligen una unidad, separamos por Proveedor.
+      const key = unidadSeleccionada === 'Todas' ? unidad : short(r.proveedor);
+      
+      if (!chartDataMap[fecha]) chartDataMap[fecha] = { fecha };
+      
+      if (!chartDataMap[fecha][key]) {
+        chartDataMap[fecha][key] = parseFloat(r.valor_unitario);
+        seriesNames.add(key);
+        rawMap[`${fecha}-${key}`] = r;
+      }
+    });
+
+  const chartTend = Object.values(chartDataMap).sort((a,b) => a.fecha.localeCompare(b.fecha));
+  const seriesArray = Array.from(seriesNames);
+
+  const preciosArr = chartTend.flatMap(d => 
+    Object.keys(d).filter(k => k !== 'fecha').map(k => d[k])
+  ).filter(v => v > 0);
+  
   const precioMin  = preciosArr.length ? Math.min(...preciosArr) : 0;
   const precioMax  = preciosArr.length ? Math.max(...preciosArr) : 0;
   const precioAvg  = preciosArr.length ? preciosArr.reduce((s, v) => s + v, 0) / preciosArr.length : 0;
@@ -636,7 +668,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
                             {alertasPrecio.subidas.map((a, i) => (
                               <div key={i} className="flex items-center justify-between bg-gray-950 p-3 rounded-lg border border-gray-800 hover:border-red-500/50 cursor-pointer transition-colors" onClick={() => buscar(a.descripcion)}>
                                 <div className="min-w-0 pr-4">
-                                  <p className="text-white text-sm font-medium truncate" title={a.descripcion}>{a.descripcion}</p>
+                                  <p className="text-white text-sm font-medium truncate" title={a.descripcion}>{a.descripcion} <span className="text-xs text-gray-500 font-normal">({a.unidad || 'N/A'})</span></p>
                                   <p className="text-gray-500 text-xs truncate">{a.proveedor}</p>
                                 </div>
                                 <div className="text-right flex-shrink-0">
@@ -657,7 +689,7 @@ export default function InteligenciaCompras({ token, onVolver }) {
                             {alertasPrecio.bajadas.map((a, i) => (
                               <div key={i} className="flex items-center justify-between bg-gray-950 p-3 rounded-lg border border-gray-800 hover:border-emerald-500/50 cursor-pointer transition-colors" onClick={() => buscar(a.descripcion)}>
                                 <div className="min-w-0 pr-4">
-                                  <p className="text-white text-sm font-medium truncate" title={a.descripcion}>{a.descripcion}</p>
+                                  <p className="text-white text-sm font-medium truncate" title={a.descripcion}>{a.descripcion} <span className="text-xs text-gray-500 font-normal">({a.unidad || 'N/A'})</span></p>
                                   <p className="text-gray-500 text-xs truncate">{a.proveedor}</p>
                                 </div>
                                 <div className="text-right flex-shrink-0">
@@ -733,7 +765,9 @@ export default function InteligenciaCompras({ token, onVolver }) {
                         <h3 className="text-white font-semibold text-lg flex items-center gap-2">
                           <TrendingUp className="text-blue-400" size={20} /> Resultados para "{query}"
                         </h3>
-                        <button onClick={() => setResultados([])} className="text-gray-400 hover:text-white text-sm">Limpiar</button>
+                        <div className="flex gap-3 items-center">
+                          <button onClick={() => setResultados([])} className="text-gray-400 hover:text-white text-sm">Limpiar</button>
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -769,7 +803,18 @@ export default function InteligenciaCompras({ token, onVolver }) {
                             <LineChart size={18} className="text-emerald-400" />
                             Historial de Precios Unitarios
                           </h3>
-                          <span className="text-gray-500 text-xs">{resultados.length} registros · clic para detalle</span>
+                          <div className="flex items-center gap-3">
+                            {unidadesUnicas.length > 2 && (
+                              <select 
+                                className="bg-gray-800 text-white rounded-lg px-3 py-1.5 text-sm border border-gray-700"
+                                value={unidadSeleccionada}
+                                onChange={e => setUnidadSeleccionada(e.target.value)}
+                              >
+                                {unidadesUnicas.map(u => <option key={u} value={u}>{u}</option>)}
+                              </select>
+                            )}
+                            <span className="text-gray-500 text-xs">{chartTend.length} registros · clic para detalle</span>
+                          </div>
                         </div>
                         <div style={{ height: 280 }}>
                           <ResponsiveContainer width="100%" height="100%">
@@ -779,17 +824,25 @@ export default function InteligenciaCompras({ token, onVolver }) {
                               <YAxis stroke="#475569" tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={v => `$${v}`} />
                               <Tooltip
                                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-                                itemStyle={{ color: '#10b981' }}
-                                formatter={v => [fmt(v), 'Precio Unit.']}
+                                formatter={(v, name) => [fmt(v), `${name}`]}
                               />
-                              <Line
-                                type="monotone" dataKey="precio" stroke="#3b82f6" strokeWidth={2.5}
-                                dot={{ fill: '#3b82f6', r: 4, cursor: 'pointer', strokeWidth: 0 }}
-                                activeDot={{
-                                  r: 7, fill: '#60a5fa', stroke: '#3b82f6', strokeWidth: 2,
-                                  onClick: (_, p) => setFacturaDetalle(p.payload.raw)
-                                }}
-                              />
+                              <Legend wrapperStyle={{ fontSize: 12, paddingTop: 10 }} />
+                              {seriesArray.map((key, idx) => (
+                                <Line
+                                  key={key}
+                                  connectNulls={true}
+                                  name={key}
+                                  type="monotone" 
+                                  dataKey={key} 
+                                  stroke={PALETTE[idx % PALETTE.length]} 
+                                  strokeWidth={2.5}
+                                  dot={{ fill: PALETTE[idx % PALETTE.length], r: 4, cursor: 'pointer', strokeWidth: 0 }}
+                                  activeDot={{
+                                    r: 7, fill: '#fff', stroke: PALETTE[idx % PALETTE.length], strokeWidth: 2,
+                                    onClick: (_, p) => setFacturaDetalle(rawMap[`${p.payload.fecha}-${p.dataKey}`])
+                                  }}
+                                />
+                              ))}
                             </LineChart>
                           </ResponsiveContainer>
                         </div>
@@ -808,7 +861,18 @@ export default function InteligenciaCompras({ token, onVolver }) {
                             <div><p className="text-gray-500 text-xs mb-1">Proveedor</p><p className="text-white font-medium">{facturaDetalle.proveedor}</p></div>
                             <div><p className="text-gray-500 text-xs mb-1">Descripción</p><p className="text-white font-medium">{facturaDetalle.descripcion}</p></div>
                             <div><p className="text-gray-500 text-xs mb-1">Fecha · Precio Unit.</p><p className="text-white font-medium">{facturaDetalle.fecha_emision} — {fmt(facturaDetalle.valor_unitario)}</p></div>
-                            <div><p className="text-gray-500 text-xs mb-1">Cantidad</p><p className="text-white font-medium">{Number(facturaDetalle.cantidad).toFixed(2)} {facturaDetalle.unidad}</p></div>
+                            <div>
+                              <p className="text-gray-500 text-xs mb-1">Cantidad</p>
+                              <div className="flex items-center gap-4">
+                                <p className="text-white font-medium">{Number(facturaDetalle.cantidad).toFixed(2)} {facturaDetalle.unidad}</p>
+                                <button 
+                                  onClick={() => setVisorUuid(facturaDetalle.uuid_factura || facturaDetalle.uuid)}
+                                  className="text-xs text-blue-400 bg-blue-500/10 px-2 py-1 rounded hover:bg-blue-500/20"
+                                >
+                                  Ver XML / PDF
+                                </button>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       )}
@@ -954,6 +1018,13 @@ export default function InteligenciaCompras({ token, onVolver }) {
             </>
           )}
         </>
+      )}
+      {visorUuid && (
+        <VisorFactura
+          uuid={visorUuid}
+          token={token}
+          onClose={() => setVisorUuid(null)}
+        />
       )}
     </div>
   );

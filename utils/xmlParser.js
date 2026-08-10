@@ -79,8 +79,15 @@ export function extractCFDIData(xmlContent) {
       });
     }
 
+    const timbre = comprobante['cfdi:Complemento']?.['tfd:TimbreFiscalDigital'] || {};
+
     return {
-      uuid: comprobante['cfdi:Complemento']?.['tfd:TimbreFiscalDigital']?.UUID || null,
+      uuid: timbre.UUID || null,
+      sello_cfd: timbre.SelloCFD || comprobante.Sello || null,
+      sello_sat: timbre.SelloSAT || null,
+      no_certificado: comprobante.NoCertificado || null,
+      no_certificado_sat: timbre.NoCertificadoSAT || null,
+      fecha_timbrado: timbre.FechaTimbrado || null,
       total: parseFloat(comprobante.Total || 0),
       subtotal: parseFloat(comprobante.SubTotal || 0),
       moneda: comprobante.Moneda || 'MXN',

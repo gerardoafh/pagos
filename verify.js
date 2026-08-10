@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import pg from 'pg';
 import {
   Fiel,
   HttpsWebClient,
@@ -11,29 +12,74 @@ import {
 // Cargar variables de entorno (.env en local, vars de docker-compose en Docker)
 try { process.loadEnvFile(); } catch (_) {}
 
+const { Client } = pg;
+const db = new Client({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD, 
+  port: parseInt(process.env.DB_PORT || '5433', 10),
+});
+
 let intentosDesconocidos = 0;
 
 async function verificarSolicitud() {
-  if (!existsSync('last_request.json')) {
-    console.error("❌ No se encontró una solicitud previa. Ejecuta 'node index.js' primero.");
-    return;
+  const rfcArgument = process.argv[2];
+  if (!rfcArgument) {
+    console.error("❌ Falta el parámetro RFC de la empresa");
+    process.exit(1);
   }
+
+  const reqFile = `last_request_${rfcArgument}.json`;
   
-  // Leemos el RequestId y Action automáticamente
-  const requestData = JSON.parse(readFileSync('last_request.json', 'utf8'));
-  const requestId = requestData.requestId.trim();
-  const action = requestData.action || 'active';
+  let requestId, action;
+
+  if (existsSync(reqFile)) {
+    // Leer del archivo local (ejecución directa)
+    const requestData = JSON.parse(readFileSync(reqFile, 'utf8'));
+    requestId = requestData.requestId.trim();
+    action = requestData.action || 'active';
+  } else {
+    // Fallback: buscar en la base de datos (ejecución desde Docker Worker)
+    try {
+      await db.connect();
+      const result = await db.query(
+        `SELECT request_id, action FROM sat_solicitudes WHERE rfc = $1 ORDER BY fecha_solicitud DESC LIMIT 1`,
+        [rfcArgument]
+      );
+      if (result.rows.length === 0) {
+        console.error(`❌ No se encontró una solicitud previa para ${rfcArgument}. Ejecuta 'node index.js ${rfcArgument}' primero.`);
+        return;
+      }
+      requestId = result.rows[0].request_id;
+      action = result.rows[0].action || 'active';
+      console.log(`📋 RequestId recuperado de la base de datos: ${requestId}`);
+    } catch (dbErr) {
+      console.error(`❌ No se encontró una solicitud previa para ${rfcArgument}. Ejecuta 'node index.js ${rfcArgument}' primero.`);
+      return;
+    }
+  }
 
   try {
+    await db.connect();
+    
+    const empresaData = await db.query('SELECT fiel_cer_path, fiel_key_path, fiel_password FROM empresas WHERE rfc = $1', [rfcArgument]);
+    if (empresaData.rows.length === 0) {
+      console.error(`❌ Empresa con RFC ${rfcArgument} no encontrada en la BD.`);
+      process.exit(1);
+    }
 
-    console.log("Cargando credenciales FIEL...");
-    const rutaCer = path.join('credenciales', process.env.FIEL_CER_NAME);
-    const rutaKey = path.join('credenciales', process.env.FIEL_KEY_NAME);
+    const { fiel_cer_path, fiel_key_path, fiel_password } = empresaData.rows[0];
+    if (!fiel_cer_path || !fiel_key_path || !fiel_password) {
+      console.error(`❌ La empresa ${rfcArgument} no tiene configurada su FIEL.`);
+      process.exit(1);
+    }
 
+    console.log(`Cargando credenciales FIEL para ${rfcArgument}...`);
     const fiel = Fiel.create(
-      readFileSync(rutaCer, 'binary'),
-      readFileSync(rutaKey, 'binary'),
-      process.env.FIEL_PASSWORD
+      readFileSync(fiel_cer_path, 'binary'),
+      readFileSync(fiel_key_path, 'binary'),
+      fiel_password
     );
 
     // Timeout de 60s para evitar crash duro por TypeError: webError.getResponse is not a function
@@ -77,7 +123,7 @@ async function verificarSolicitud() {
 
       console.log(`\n🚀 Detonando descarga e ingesta de paquetes automáticamente (Modo: ${action})...`);
       for (const packageId of paquetes) {
-        execSync(`node download.js ${packageId} ${action}`, { stdio: 'inherit' });
+        execSync(`node download.js ${rfcArgument} ${packageId} ${action}`, { stdio: 'inherit' });
       }
     } else if (estadoPeticion.isTypeOf('InProgress') || estadoPeticion.isTypeOf('Accepted')) {
       console.log("⏳ El SAT sigue armando los XML físicos. Volviendo a preguntar en 60 segundos...\n");
@@ -92,7 +138,9 @@ async function verificarSolicitud() {
     }
 
   } catch (error) {
-    console.error("Error durante la verificación:", error);
+    console.error("❌ Ocurrió un error en la verificación:", error.message || error);
+  } finally {
+    await db.end();
   }
 }
 

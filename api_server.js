@@ -14,6 +14,10 @@ import { createServer } from 'http'; // <-- Servidor HTTP para WebSockets
 import { Server } from 'socket.io'; // <-- WebSockets
 import { registerComprasEndpoints } from './routes/compras.js'; // Inteligencia de Compras
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Cargar variables de entorno nativas (.env) — Solo en desarrollo local.
 // En Docker, las variables se inyectan vía env_file / environment en docker-compose.
 try {
@@ -28,18 +32,18 @@ const server = createServer(app);
 // 🛡️ Configuración de WebSockets (Socket.io)
 const io = new Server(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    origin: '*',
     methods: ['GET', 'POST']
   }
 });
 
 // Inyectar io en la app para usarlo en endpoints y middlewares
 app.set('io', io);
+setIoForQueues(io);
 
 // 🛡️ Configuración segura de CORS
 const corsOptions = {
-  // Vite usa por defecto el puerto 5173. Puedes cambiar esto en tu .env con CORS_ORIGIN
-  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin: '*',
   methods: ['GET', 'POST', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
@@ -79,13 +83,32 @@ async function autoSetup() {
         rfc VARCHAR(13) UNIQUE NOT NULL,
         razon_social VARCHAR(255) NOT NULL,
         activa BOOLEAN DEFAULT TRUE,
+        fiel_cer_path VARCHAR(255),
+        fiel_key_path VARCHAR(255),
+        fiel_password VARCHAR(255),
         creada_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
       
       -- Insertar la empresa principal por defecto si no existe
-      INSERT INTO empresas (rfc, razon_social) 
-      VALUES ('CWM020627SJ7', 'CHEONG WOON MEXICO SA DE CV')
-      ON CONFLICT (rfc) DO NOTHING;
+      INSERT INTO empresas (rfc, razon_social, fiel_cer_path, fiel_key_path, fiel_password) 
+      VALUES (
+        'CWM020627SJ7', 
+        'CHEONG WOON MEXICO SA DE CV',
+        'credenciales/${process.env.FIEL_CER_NAME || 'cercwm.cer'}',
+        'credenciales/${process.env.FIEL_KEY_NAME || 'fielcwm.key'}',
+        '${process.env.FIEL_PASSWORD || 'Chw00n0206'}'
+      )
+      ON CONFLICT (rfc) DO UPDATE SET
+        fiel_cer_path = EXCLUDED.fiel_cer_path,
+        fiel_key_path = EXCLUDED.fiel_key_path,
+        fiel_password = EXCLUDED.fiel_password;
+    `);
+
+    // Alter table just in case it was created without the FIEL columns
+    await db.query(`
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS fiel_cer_path VARCHAR(255);
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS fiel_key_path VARCHAR(255);
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS fiel_password VARCHAR(255);
     `);
 
     // 2. Tabla principal de facturas
@@ -135,7 +158,12 @@ async function autoSetup() {
       ADD COLUMN IF NOT EXISTS importado_en TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
       ADD COLUMN IF NOT EXISTS regimen_fiscal_emisor VARCHAR(10),
       ADD COLUMN IF NOT EXISTS cp_emisor VARCHAR(10),
-      ADD COLUMN IF NOT EXISTS fecha_pago TIMESTAMP WITH TIME ZONE;
+      ADD COLUMN IF NOT EXISTS fecha_pago TIMESTAMP WITH TIME ZONE,
+      ADD COLUMN IF NOT EXISTS sello_cfd TEXT,
+      ADD COLUMN IF NOT EXISTS sello_sat TEXT,
+      ADD COLUMN IF NOT EXISTS no_certificado VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS no_certificado_sat VARCHAR(100),
+      ADD COLUMN IF NOT EXISTS fecha_timbrado TIMESTAMP WITH TIME ZONE;
       
       -- Añadir Foreign Key si no existe
       DO $$
@@ -330,7 +358,18 @@ async function autoSetup() {
       );
     `);
 
-    // 9. Crear usuario admin por defecto si no existe
+    // 9. Tabla de solicitudes SAT (almacenamiento compartido entre contenedores)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS sat_solicitudes (
+        id SERIAL PRIMARY KEY,
+        rfc VARCHAR(13) NOT NULL,
+        request_id VARCHAR(100) NOT NULL,
+        action VARCHAR(20) DEFAULT 'active',
+        fecha_solicitud TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 10. Crear usuario admin por defecto si no existe
     const existe = await db.query("SELECT id FROM usuarios WHERE usuario = 'admin'");
     if (existe.rows.length === 0) {
       const passwordDefault = process.env.ADMIN_PASSWORD || 'CWM_Admin_2026!';
@@ -370,7 +409,7 @@ function verifyPassword(password, storedHash) {
 }
 
 // ==========================================================
-import { setupRepeatableJobs, satQueue, nasQueue } from './utils/queues.js';
+import { setupRepeatableJobs, satQueue, nasQueue, setIoForQueues } from './utils/queues.js';
 import { cacheMiddleware, clearCachePrefix } from './utils/cache.js';
 import { requireRole } from './utils/rbac.js';
 import { registrarAuditoria } from './utils/audit.js';
@@ -444,6 +483,145 @@ app.post('/api/login', async (req, res) => {
 // ==========================================================
 // ENDPOINT 1: OBTENER FACTURAS PARA EL DASHBOARD
 // ==========================================================
+
+// ==========================================================
+// GESTIÓN DE USUARIOS
+// ==========================================================
+app.get('/api/usuarios', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT id, usuario, rol, activo, creado_en FROM usuarios ORDER BY id ASC'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error al obtener usuarios:', err);
+    res.status(500).json({ error: 'Error al obtener usuarios' });
+  }
+});
+
+app.post('/api/usuarios', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { usuario, password, rol } = req.body;
+  if (!usuario || !password || !rol) {
+    return res.status(400).json({ error: 'Faltan campos requeridos' });
+  }
+
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const result = await db.query(
+      'INSERT INTO usuarios (usuario, password_hash, rol) VALUES ($1, $2, $3) RETURNING id, usuario, rol, activo, creado_en',
+      [usuario, hash, rol]
+    );
+    await registrarAuditoria(req, 'Creación de Usuario', 'usuarios', result.rows[0].id, { usuario, rol });
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') { // Unique violation
+      return res.status(409).json({ error: 'El nombre de usuario ya existe' });
+    }
+    console.error('Error al crear usuario:', err);
+    res.status(500).json({ error: 'Error al crear usuario' });
+  }
+});
+
+app.put('/api/usuarios/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { id } = req.params;
+  const { password, rol, activo } = req.body;
+  
+  try {
+    // Si se pasa un password, actualizamos el hash también
+    if (password && password.trim() !== '') {
+      const hash = await bcrypt.hash(password, 10);
+      await db.query(
+        'UPDATE usuarios SET password_hash = $1, rol = $2, activo = $3 WHERE id = $4',
+        [hash, rol, activo, id]
+      );
+    } else {
+      await db.query(
+        'UPDATE usuarios SET rol = $1, activo = $2 WHERE id = $3',
+        [rol, activo, id]
+      );
+    }
+    
+    await registrarAuditoria(req, 'Actualización de Usuario', 'usuarios', id, { rol, activo, passwordCambiada: !!password });
+    res.json({ mensaje: 'Usuario actualizado con éxito' });
+  } catch (err) {
+    console.error('Error al actualizar usuario:', err);
+    res.status(500).json({ error: 'Error al actualizar usuario' });
+  }
+});
+
+app.delete('/api/usuarios/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.query('UPDATE usuarios SET activo = false WHERE id = $1', [id]);
+    await registrarAuditoria(req, 'Baja de Usuario (Desactivación)', 'usuarios', id, { activo: false });
+    res.json({ mensaje: 'Usuario desactivado con éxito' });
+  } catch (err) {
+    console.error('Error al desactivar usuario:', err);
+    res.status(500).json({ error: 'Error al desactivar usuario' });
+  }
+});
+
+// ==========================================================
+// EMPRESAS (Multi-Tenant)
+// ==========================================================
+app.get('/api/empresas', authenticateToken, async (req, res) => {
+  try {
+    const query = await db.query('SELECT rfc, razon_social, activa FROM empresas ORDER BY razon_social ASC');
+    res.json(query.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint para subir FIEL (.cer, .key y password)
+app.post('/api/empresas/:rfc/fiel', authenticateToken, requireRole(['admin']), upload.fields([{ name: 'cerFile', maxCount: 1 }, { name: 'keyFile', maxCount: 1 }]), async (req, res) => {
+  const { rfc } = req.params;
+  const { fiel_password } = req.body;
+  const files = req.files;
+
+  try {
+    const empresaCheck = await db.query('SELECT * FROM empresas WHERE rfc = $1', [rfc]);
+    if (empresaCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Empresa no encontrada' });
+    }
+
+    const cerFile = files['cerFile'] ? files['cerFile'][0] : null;
+    const keyFile = files['keyFile'] ? files['keyFile'][0] : null;
+    
+    // We update paths only if a new file is uploaded
+    let queryUpdates = [];
+    let values = [];
+    let paramIndex = 1;
+
+    if (cerFile) {
+      const destCer = path.join('credenciales', `cer_${rfc}.cer`);
+      await fsp.rename(cerFile.path, destCer);
+      queryUpdates.push(`fiel_cer_path = $${paramIndex++}`);
+      values.push(destCer);
+    }
+    if (keyFile) {
+      const destKey = path.join('credenciales', `key_${rfc}.key`);
+      await fsp.rename(keyFile.path, destKey);
+      queryUpdates.push(`fiel_key_path = $${paramIndex++}`);
+      values.push(destKey);
+    }
+    if (fiel_password !== undefined) {
+      queryUpdates.push(`fiel_password = $${paramIndex++}`);
+      values.push(fiel_password);
+    }
+
+    if (queryUpdates.length > 0) {
+      values.push(rfc);
+      await db.query(`UPDATE empresas SET ${queryUpdates.join(', ')} WHERE rfc = $${paramIndex}`, values);
+    }
+
+    res.json({ mensaje: 'Credenciales FIEL actualizadas correctamente' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al actualizar FIEL' });
+  }
+});
+
 app.get('/api/facturas', authenticateToken, cacheMiddleware(60), async (req, res) => {
   const empresaRfc = req.headers['x-empresa-rfc'];
   try {
@@ -547,6 +725,41 @@ app.get('/api/gastos', authenticateToken, cacheMiddleware(300), async (req, res)
     res.json(result.rows);
   } catch (err) {
     console.error("Error al obtener gastos:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================================
+// ENDPOINT 1.6: DETALLE COMPLETO DE FACTURA (VISOR PDF)
+// ==========================================================
+app.get('/api/facturas/:uuid', authenticateToken, async (req, res) => {
+  const { uuid } = req.params;
+  try {
+    const queryStr = `
+      SELECT f.*, e.razon_social as receptor_nombre 
+      FROM facturas_recibidas f 
+      LEFT JOIN empresas e ON f.rfc_receptor = e.rfc
+      WHERE f.uuid = $1
+    `;
+    const facturaResult = await db.query(queryStr, [uuid]);
+    
+    if (facturaResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Factura no encontrada' });
+    }
+
+    const factura = facturaResult.rows[0];
+
+    const conceptosResult = await db.query(
+      `SELECT * FROM factura_conceptos WHERE uuid_factura = $1`,
+      [uuid]
+    );
+
+    res.json({
+      ...factura,
+      conceptos: conceptosResult.rows
+    });
+  } catch (err) {
+    console.error("Error al obtener detalle de factura:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -746,21 +959,24 @@ app.post('/api/escanear-nas', authenticateToken, requireRole(['admin', 'auxiliar
 // ==========================================================
 app.post('/api/sat/sync', authenticateToken, requireRole(['admin', 'auxiliar']), heavyTasksLimiter, async (req, res) => {
   const { fechaInicio, fechaFin, estatus } = req.body || {};
-  console.log(`☁️ Sincronización SAT encolada. Rango: ${fechaInicio} a ${fechaFin}. Estatus: ${estatus}`);
+  const rfc = req.headers['x-empresa-rfc'];
+  console.log(`☁️ Sincronización SAT encolada. Empresa: ${rfc || 'Todas'} Rango: ${fechaInicio} a ${fechaFin}. Estatus: ${estatus}`);
   const tarea = 'Sincronización SAT';
-  io.emit('process-log', { tarea, linea: `☁️ Sincronización SAT añadida a la cola (Estatus: ${estatus})...`, ts: new Date().toISOString() });
+  io.emit('process-log', { tarea, linea: `☁️ Sincronización SAT añadida a la cola (Empresa: ${rfc || 'Todas'}, Estatus: ${estatus})...`, ts: new Date().toISOString() });
 
   try {
-    await satQueue.add('downloadSat', { fechaInicio, fechaFin, estatus });
+    await satQueue.add('downloadSat', { rfc, fechaInicio, fechaFin, estatus });
+    // Encolar verifySat secuencialmente para que se ejecute después del download
+    await satQueue.add('verifySat', { rfc }, { delay: 60000 }); // Retraso de 1 min para dar ventaja al SAT
     
     await registrarAuditoria(req, 'Disparo Sincronización SAT', 'satQueue', 'N/A', {
+      rfc,
       fechaInicio,
       fechaFin,
       estatus
     });
 
-    // Nota: El verifySat correrá en la madrugada mediante cron, o podemos encolarlo secuencialmente en el worker
-    res.json({ mensaje: "Proceso SAT encolado exitosamente." });
+    res.json({ mensaje: "Proceso SAT y Verificación encolados exitosamente." });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "No se pudo encolar la tarea" });
@@ -1326,14 +1542,19 @@ app.post('/api/contabilidad/mapear-proveedor', authenticateToken, async (req, re
 // ==========================================================
 // MÓDULO CONTABLE: ENDPOINT 12.1 - API BRIDGE CONTPAQi (JSON)
 // ==========================================================
-app.get('/api/contabilidad/polizas.json', authenticateToken, requireRole(['admin', 'contador']), async (req, res) => {
-  const { anio, mes, dia } = req.query; // Ej. ?anio=2026&mes=05&dia=15
+app.get('/api/contabilidad/polizas.json', authenticateToken, async (req, res) => {
+  const { anio, mes, dia, rfc_receptor } = req.query; 
   try {
     let dateFilter = "TO_CHAR(f.fecha_emision, 'YYYY-MM') = $1";
     let params = [`${anio}-${mes}`];
     if (dia && dia !== 'Todos') {
       dateFilter = "TO_CHAR(f.fecha_emision, 'YYYY-MM-DD') = $1";
       params = [`${anio}-${mes}-${dia}`];
+    }
+    
+    if (rfc_receptor) {
+      dateFilter += ` AND f.rfc_receptor = $${params.length + 1}`;
+      params.push(rfc_receptor);
     }
 
     const query = await db.query(`
@@ -1347,7 +1568,7 @@ app.get('/api/contabilidad/polizas.json', authenticateToken, requireRole(['admin
       JOIN configuracion_contable_proveedor cc ON f.rfc_emisor = cc.rfc_emisor
       JOIN cuentas_contables cg ON cc.cuenta_gasto_id = cg.id
       JOIN cuentas_contables cp ON cc.cuenta_pasivo_id = cp.id
-      JOIN cuentas_contables civa ON cc.cuenta_iva_pendiente_id = civa.id
+      LEFT JOIN cuentas_contables civa ON cc.cuenta_iva_pendiente_id = civa.id
       WHERE ${dateFilter} AND f.tipo_comprobante = 'I'
     `, params);
 
@@ -1355,23 +1576,24 @@ app.get('/api/contabilidad/polizas.json', authenticateToken, requireRole(['admin
       const fechaFormateada = new Date(factura.fecha_emision).toISOString().slice(0,10).replace(/-/g, '');
       const conceptoPoliza = `Fca Prov: ${factura.nombre_emisor.substring(0,30)} Folio ${factura.folio_interno || ''}`;
       
+      // Filtrar movimientos con cuenta null (ej. si no hay IVA configurado)
       return {
         rfc_receptor: factura.rfc_receptor,
         tipo: 'Diario',
         fecha: fechaFormateada,
         concepto: conceptoPoliza,
         movimientos: [
-          { cuenta: factura.cta_gasto, tipo_movimiento: 'Cargo', importe: Number(factura.subtotal).toFixed(2), referencia: factura.uuid },
-          { cuenta: factura.cta_iva, tipo_movimiento: 'Cargo', importe: Number(factura.iva).toFixed(2), referencia: factura.uuid },
-          { cuenta: factura.cta_pasivo, tipo_movimiento: 'Abono', importe: factura.total, referencia: factura.uuid }
-        ]
+          { cuenta: factura.cta_gasto, tipo_movimiento: 'Cargo', importe: Number(factura.subtotal).toFixed(2), concepto: `Gasto: ${factura.folio_interno || 'S/F'}`, referencia: factura.uuid },
+          { cuenta: factura.cta_iva, tipo_movimiento: 'Cargo', importe: Number(factura.iva).toFixed(2), concepto: `IVA: ${factura.folio_interno || 'S/F'}`, referencia: factura.uuid },
+          { cuenta: factura.cta_pasivo, tipo_movimiento: 'Abono', importe: factura.total, concepto: `Pasivo: ${factura.folio_interno || 'S/F'}`, referencia: factura.uuid }
+        ].filter(m => m.cuenta != null && m.importe > 0)
       };
     });
 
-    res.json({ success: true, polizas: polizasJson });
+    res.json(polizasJson);
   } catch (err) {
-    console.error("❌ Error en API Bridge CONTPAQi:", err);
-    res.status(500).json({ error: 'Falla al extraer pólizas' });
+    console.error("❌ Error en API Bridge CONTPAQi (polizas.json):", err.message, err.stack);
+    res.status(500).json({ error: 'Falla al extraer pólizas: ' + err.message });
   }
 });
 
@@ -1379,13 +1601,18 @@ app.get('/api/contabilidad/polizas.json', authenticateToken, requireRole(['admin
 // MÓDULO CONTABLE: ENDPOINT 12 - EXPORTAR CONTPAQi
 // ==========================================================
 app.get('/api/contabilidad/exportar-contpaqi', authenticateToken, async (req, res) => {
-  const { anio, mes, dia } = req.query; // Ej. ?anio=2026&mes=05&dia=15
+  const { anio, mes, dia, rfc_receptor } = req.query; 
   try {
     let dateFilter = "TO_CHAR(f.fecha_emision, 'YYYY-MM') = $1";
     let params = [`${anio}-${mes}`];
     if (dia && dia !== 'Todos') {
       dateFilter = "TO_CHAR(f.fecha_emision, 'YYYY-MM-DD') = $1";
       params = [`${anio}-${mes}-${dia}`];
+    }
+    
+    if (rfc_receptor) {
+      dateFilter += ` AND f.rfc_receptor = $${params.length + 1}`;
+      params.push(rfc_receptor);
     }
 
     const query = await db.query(`
@@ -1577,11 +1804,19 @@ app.get('/api/contabilidad/exportar-diot', authenticateToken, async (req, res) =
 // INTELIGENCIA DE COMPRAS: BUSCAR CONCEPTOS E HISTÓRICO
 // ==========================================================
 app.get('/api/conceptos/buscar', authenticateToken, cacheMiddleware(60), async (req, res) => {
-  const { q } = req.query;
+  const { q, rfc_receptor } = req.query;
   if (!q) return res.json([]);
   
   try {
     const term = `%${q}%`;
+    const params = [term];
+    let whereFilter = "fc.descripcion ILIKE $1 OR fc.clave_prod_serv ILIKE $1 OR f.nombre_emisor ILIKE $1";
+    
+    if (rfc_receptor && rfc_receptor !== 'Todas') {
+      whereFilter = `(${whereFilter}) AND f.rfc_receptor = $2`;
+      params.push(rfc_receptor);
+    }
+
     const query = await db.query(`
       SELECT 
         fc.id,
@@ -1597,10 +1832,10 @@ app.get('/api/conceptos/buscar', authenticateToken, cacheMiddleware(60), async (
         f.uuid
       FROM factura_conceptos fc
       JOIN facturas_recibidas f ON fc.uuid_factura = f.uuid
-      WHERE fc.descripcion ILIKE $1 OR fc.clave_prod_serv ILIKE $1 OR f.nombre_emisor ILIKE $1
+      WHERE ${whereFilter}
       ORDER BY f.fecha_emision ASC
       LIMIT 1000
-    `, [term]);
+    `, params);
     res.json(query.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });

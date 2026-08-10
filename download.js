@@ -76,11 +76,12 @@ function extraerXMLsDelZip(zipPath) {
 }
 
 async function descargarYProcesar() {
-  const packageId = process.argv[2];
-  const action = process.argv[3] || 'active'; // 'active' o 'cancelled'
+  const rfcArgument = process.argv[2];
+  const packageId = process.argv[3];
+  const action = process.argv[4] || 'active'; // 'active' o 'cancelled'
 
-  if (!packageId) {
-    console.error("❌ Error: No se proporcionó el ID del paquete. (Ejemplo: node download.js <PACKAGE_ID>)");
+  if (!rfcArgument || !packageId) {
+    console.error("❌ Error: Faltan argumentos. (Ejemplo: node download.js <RFC> <PACKAGE_ID>)");
     return;
   }
 
@@ -89,14 +90,23 @@ async function descargarYProcesar() {
     await db.connect();
     console.log("✅ Conexión a Postgres exitosa.");
 
-    console.log("Cargando credenciales FIEL...");
-    const rutaCer = path.join('credenciales', process.env.FIEL_CER_NAME);
-    const rutaKey = path.join('credenciales', process.env.FIEL_KEY_NAME);
+    const empresaData = await db.query('SELECT fiel_cer_path, fiel_key_path, fiel_password FROM empresas WHERE rfc = $1', [rfcArgument]);
+    if (empresaData.rows.length === 0) {
+      console.error(`❌ Empresa con RFC ${rfcArgument} no encontrada en la BD.`);
+      process.exit(1);
+    }
 
+    const { fiel_cer_path, fiel_key_path, fiel_password } = empresaData.rows[0];
+    if (!fiel_cer_path || !fiel_key_path || !fiel_password) {
+      console.error(`❌ La empresa ${rfcArgument} no tiene configurada su FIEL.`);
+      process.exit(1);
+    }
+
+    console.log(`Cargando credenciales FIEL para ${rfcArgument}...`);
     const fiel = Fiel.create(
-      readFileSync(rutaCer, 'binary'),
-      readFileSync(rutaKey, 'binary'),
-      process.env.FIEL_PASSWORD
+      readFileSync(fiel_cer_path, 'binary'),
+      readFileSync(fiel_key_path, 'binary'),
+      fiel_password
     );
 
     // Timeout de 60s para evitar crashes si el SAT demora mucho en la descarga
@@ -177,13 +187,15 @@ async function descargarYProcesar() {
         continue;
       }
       
-      const rfcEmisor = xmlData.rfc_emisor;
-      const uuid = xmlData.uuid;
+      const { 
+        total: monto, subtotal, iva, iva_retenido, isr_retenido, fecha: fechaEmision, 
+        rfc_emisor: rfcEmisor, nombre_emisor: nombreEmisor, rfc_receptor,
+        folio, serie, tipo_comprobante: tipo, conceptos, relacionados, metodo_pago: metodoPago,
+        regimen_fiscal_emisor, cp_emisor,
+        sello_cfd, sello_sat, no_certificado, no_certificado_sat, fecha_timbrado, uuid
+      } = xmlData;
 
-      if (!rfcEmisor || !uuid) {
-        console.warn(`   ⚠️ XML sin UUID o RFC Emisor válido, ignorando.`);
-        continue;
-      }
+      const folioCompleto = [serie, folio].filter(Boolean).join('-') || null;
 
       // Si la acción es Canceladas, eliminamos de BD y de NAS
       if (action === 'cancelled') {
@@ -211,13 +223,10 @@ async function descargarYProcesar() {
       }
 
       // ======= FLUJO NORMAL (VIGENTES) =======
-      const nombreEmisor = xmlData.nombre_emisor || 'Sin Nombre';
-      const { fecha: fechaEmision, 
-              total: monto, subtotal, iva, iva_retenido, isr_retenido, 
-              tipo_comprobante: tipo, metodo_pago: metodoPago, serie, folio, conceptos, rfc_receptor, 
-              regimen_fiscal_emisor, cp_emisor, relacionados } = xmlData;
-
-      const folioCompleto = [serie, folio].filter(Boolean).join('-') || null;
+      const emisorNom = xmlData.nombre_emisor || 'Sin Nombre';
+      
+      // Variables ya extraidas en la linea 190, renombramos folioCompleto para usar los datos ya extraidos
+      const folioCompVigente = [serie, folio].filter(Boolean).join('-') || null;
 
       // ESCUDO: IGNORAR NÓMINAS
       if (tipo === 'N') {
@@ -238,8 +247,8 @@ async function descargarYProcesar() {
       try {
         const resultado = await db.query(
             `INSERT INTO facturas_recibidas 
-             (uuid, rfc_emisor, nombre_emisor, regimen_fiscal_emisor, cp_emisor, fecha_emision, total, subtotal, iva, iva_retenido, isr_retenido, estatus_pago, folio_interno, tipo_comprobante, url_expediente, metodo_pago, rfc_receptor)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pendiente', $12, $13, $14, $15, $16)
+             (uuid, rfc_emisor, nombre_emisor, regimen_fiscal_emisor, cp_emisor, fecha_emision, total, subtotal, iva, iva_retenido, isr_retenido, estatus_pago, folio_interno, tipo_comprobante, url_expediente, metodo_pago, rfc_receptor, sello_cfd, sello_sat, no_certificado, no_certificado_sat, fecha_timbrado)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pendiente', $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
            ON CONFLICT (uuid) DO UPDATE 
              SET url_expediente = EXCLUDED.url_expediente,
                  folio_interno   = COALESCE(facturas_recibidas.folio_interno, EXCLUDED.folio_interno),
@@ -251,9 +260,14 @@ async function descargarYProcesar() {
                  isr_retenido = EXCLUDED.isr_retenido,
                  rfc_receptor = EXCLUDED.rfc_receptor,
                  regimen_fiscal_emisor = EXCLUDED.regimen_fiscal_emisor,
-                 cp_emisor = EXCLUDED.cp_emisor
+                 cp_emisor = EXCLUDED.cp_emisor,
+                 sello_cfd = EXCLUDED.sello_cfd,
+                 sello_sat = EXCLUDED.sello_sat,
+                 no_certificado = EXCLUDED.no_certificado,
+                 no_certificado_sat = EXCLUDED.no_certificado_sat,
+                 fecha_timbrado = EXCLUDED.fecha_timbrado
            RETURNING (xmax = 0) AS fue_insert`,
-          [uuid, rfcEmisor, nombreEmisor, regimen_fiscal_emisor, cp_emisor, fechaEmision, monto, subtotal, iva, iva_retenido, isr_retenido, folioCompleto, tipo, carpetaDossier, metodoPago, rfc_receptor]
+          [uuid, rfcEmisor, nombreEmisor, regimen_fiscal_emisor, cp_emisor, fechaEmision, monto, subtotal, iva, iva_retenido, isr_retenido, folioCompleto, tipo, carpetaDossier, metodoPago, rfc_receptor, sello_cfd, sello_sat, no_certificado, no_certificado_sat, fecha_timbrado]
         );
 
         // Guardar conceptos asociados a la factura

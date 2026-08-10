@@ -12,32 +12,34 @@ import {
   Menu,
   X,
   FileText,
-  Landmark
+  Landmark,
+  Building,
+  Users
 } from 'lucide-react';
+import { NavLink } from 'react-router-dom';
+import { useEmpresa } from '../context/EmpresaContext.jsx';
 
-export default function Layout({ children, currentHash, handleLogout }) {
+export default function Layout({ children, handleLogout }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { empresas, currentEmpresa, changeEmpresa, loading } = useEmpresa();
 
   const navigation = [
-    { name: 'Dashboard Principal', hash: '', icon: LayoutDashboard },
-    { name: 'Reporte de Gastos', hash: 'gastos', icon: Receipt },
-    { name: 'Módulo de Pagos', hash: 'pagos', icon: CreditCard },
-    { name: 'Conciliación Bancaria', hash: 'conciliacion', icon: Landmark },
-    { name: 'Inteligencia Compras', hash: 'compras', icon: TrendingUp },
-    { name: 'Mapeo Contable', hash: 'contabilidad', icon: FileSpreadsheet },
-    { name: 'REPs Huérfanos', hash: 'reps-huerfanos', icon: FileText },
+    { name: 'Dashboard Principal', hash: '/', icon: LayoutDashboard },
+    { name: 'Reporte de Gastos', hash: '/gastos', icon: Receipt },
+    { name: 'Módulo de Pagos', hash: '/pagos', icon: CreditCard },
+    { name: 'Conciliación Bancaria', hash: '/conciliacion', icon: Landmark },
+    { name: 'Modulo de Compras', hash: '/compras', icon: TrendingUp },
+    { name: 'Mapeo Contable', hash: '/contabilidad', icon: FileSpreadsheet },
+    { name: 'REPs Huérfanos', hash: '/reps-huerfanos', icon: FileText },
   ];
 
   const system = [
-    { name: 'Logs del Sistema', hash: 'logs', icon: Terminal },
-    { name: 'Auditoría', hash: 'auditoria', icon: ShieldAlert },
-    { name: 'Configuración', hash: 'config', icon: Settings },
+    { name: 'Logs del Sistema', hash: '/logs', icon: Terminal },
+    { name: 'Auditoría', hash: '/auditoria', icon: ShieldAlert },
+    { name: 'Configurar SAT', hash: '/config-empresa', icon: Building },
+    { name: 'Usuarios y Perfiles', hash: '/usuarios', icon: Users },
+    { name: 'Configuración', hash: '/config', icon: Settings },
   ];
-
-  const navigateTo = (hash) => {
-    window.location.hash = hash;
-    setSidebarOpen(false);
-  };
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col md:flex-row font-sans text-gray-200">
@@ -59,9 +61,26 @@ export default function Layout({ children, currentHash, handleLogout }) {
         md:relative md:translate-x-0
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
-        <div className="p-6 hidden md:block">
+        <div className="p-6 hidden md:block border-b border-gray-800">
           <h1 className="text-2xl font-bold text-white tracking-tight">CWM System</h1>
           <p className="text-xs text-gray-500 mt-1 uppercase tracking-wider font-semibold">Pagos y Conciliación</p>
+          
+          <div className="mt-4">
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 font-bold">Empresa Activa</p>
+            {loading ? (
+              <div className="h-8 bg-gray-800 rounded animate-pulse"></div>
+            ) : (
+              <select 
+                className="w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white outline-none focus:border-blue-500 transition-colors"
+                value={currentEmpresa?.rfc || ''}
+                onChange={e => changeEmpresa(e.target.value)}
+              >
+                {empresas.map(e => (
+                  <option key={e.rfc} value={e.rfc}>{e.razon_social}</option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-2 space-y-6">
@@ -71,21 +90,25 @@ export default function Layout({ children, currentHash, handleLogout }) {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 px-2">Finanzas</p>
             <ul className="space-y-1">
               {navigation.map((item) => {
-                const isActive = currentHash === item.hash;
                 const Icon = item.icon;
                 return (
                   <li key={item.hash}>
-                    <button
-                      onClick={() => navigateTo(item.hash)}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-sm font-medium ${
+                    <NavLink
+                      to={item.hash}
+                      onClick={() => setSidebarOpen(false)}
+                      className={({ isActive }) => `w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-sm font-medium ${
                         isActive 
                           ? 'bg-blue-600/10 text-blue-400' 
                           : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
                       }`}
                     >
-                      <Icon size={18} className={isActive ? 'text-blue-400' : 'text-gray-500'} />
-                      {item.name}
-                    </button>
+                      {({ isActive }) => (
+                        <>
+                          <Icon size={18} className={isActive ? 'text-blue-400' : 'text-gray-500'} />
+                          {item.name}
+                        </>
+                      )}
+                    </NavLink>
                   </li>
                 );
               })}
@@ -97,21 +120,25 @@ export default function Layout({ children, currentHash, handleLogout }) {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 px-2">Sistema</p>
             <ul className="space-y-1">
               {system.map((item) => {
-                const isActive = currentHash === item.hash;
                 const Icon = item.icon;
                 return (
                   <li key={item.hash}>
-                    <button
-                      onClick={() => navigateTo(item.hash)}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-sm font-medium ${
+                    <NavLink
+                      to={item.hash}
+                      onClick={() => setSidebarOpen(false)}
+                      className={({ isActive }) => `w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all text-sm font-medium ${
                         isActive 
                           ? 'bg-purple-600/10 text-purple-400' 
                           : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
                       }`}
                     >
-                      <Icon size={18} className={isActive ? 'text-purple-400' : 'text-gray-500'} />
-                      {item.name}
-                    </button>
+                      {({ isActive }) => (
+                        <>
+                          <Icon size={18} className={isActive ? 'text-purple-400' : 'text-gray-500'} />
+                          {item.name}
+                        </>
+                      )}
+                    </NavLink>
                   </li>
                 );
               })}

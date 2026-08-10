@@ -1,8 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Search, FileSpreadsheet, Upload, FolderOpen, CheckCircle2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Search, FileSpreadsheet, Upload, FolderOpen, CheckCircle2, X, TrendingUp } from 'lucide-react';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { API_BASE } from '../api.js';
+import { useEmpresa } from '../context/EmpresaContext.jsx';
+import VisorFactura from '../components/VisorFactura.jsx';
 
 const Gastos = () => {
+  const { currentEmpresa } = useEmpresa();
   const [gastos, setGastos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -10,11 +14,14 @@ const Gastos = () => {
   const [busqueda, setBusqueda] = useState('');
   const [filtroAnio, setFiltroAnio] = useState('todos');
   const [filtroMes, setFiltroMes] = useState('todos');
+  const [visorUuid, setVisorUuid] = useState(null);
+  const [conceptoTendencia, setConceptoTendencia] = useState(null);
 
   const fetchGastos = async () => {
+    if (!currentEmpresa) return;
     try {
       const token = localStorage.getItem('token'); 
-      const response = await fetch(`${API_BASE}/api/gastos`, {
+      const response = await fetch(`${API_BASE}/api/gastos?rfc_receptor=${currentEmpresa.rfc}`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -31,8 +38,10 @@ const Gastos = () => {
   };
 
   useEffect(() => {
-    fetchGastos();
-  }, []);
+    if (currentEmpresa) {
+      fetchGastos();
+    }
+  }, [currentEmpresa]);
 
   const abrirEnExplorador = async (ruta) => {
     try {
@@ -295,10 +304,27 @@ const Gastos = () => {
             {gastosPaginados.map((gasto, index) => (
               <tr key={index} className="hover:bg-white/[0.04] transition-colors group">
                 <td className="py-4 px-4 text-gray-400">{gasto.fecha}</td>
-                <td className="py-4 px-4 font-medium text-gray-200">{gasto.factura}</td>
+                <td className="py-4 px-4">
+                  <button 
+                    onClick={() => setVisorUuid(gasto.uuid)}
+                    className="font-medium text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
+                    title="Ver detalle del XML/PDF"
+                  >
+                    {gasto.factura}
+                  </button>
+                </td>
                 <td className="py-4 px-4 text-gray-300">{gasto.moneda}</td>
                 <td className="py-4 px-4 font-medium text-gray-200">{gasto.proveedor}</td>
-                <td className="py-4 px-4 text-gray-300 truncate max-w-[250px]" title={gasto.concepto}>{gasto.concepto}</td>
+                <td className="py-4 px-4 truncate max-w-[250px]">
+                  <button
+                    onClick={() => setConceptoTendencia(gasto.concepto)}
+                    className="text-gray-300 hover:text-indigo-400 transition-colors text-left w-full flex items-center gap-1.5 group"
+                    title={`Ver tendencia: ${gasto.concepto}`}
+                  >
+                    <TrendingUp size={12} className="opacity-0 group-hover:opacity-100 text-indigo-400 shrink-0 transition-opacity" />
+                    <span className="truncate group-hover:underline">{gasto.concepto}</span>
+                  </button>
+                </td>
                 <td className="py-4 px-4 text-right text-gray-400">${gasto.subtotal}</td>
                 <td className="py-4 px-4 text-right text-gray-400">${gasto.iva}</td>
                 <td className="py-4 px-4 text-right text-gray-400">${gasto.ret_iva}</td>
@@ -390,6 +416,100 @@ const Gastos = () => {
           )}
         </div>
       </div>
+      
+      {visorUuid && (
+        <VisorFactura 
+          uuid={visorUuid} 
+          token={localStorage.getItem('token')} 
+          onClose={() => setVisorUuid(null)} 
+        />
+      )}
+
+      {/* Modal Tendencia de Concepto */}
+      {conceptoTendencia && (() => {
+        const registros = gastos.filter(g => g.concepto === conceptoTendencia);
+        const porMes = registros.reduce((acc, g) => {
+          const mes = g.fecha?.substring(0, 7);
+          if (!mes) return acc;
+          const ex = acc.find(a => a.mes === mes);
+          if (ex) { ex.total += parseFloat(g.total || 0); ex.compras++; }
+          else acc.push({ mes, total: parseFloat(g.total || 0), compras: 1 });
+          return acc;
+        }, []).sort((a, b) => a.mes.localeCompare(b.mes));
+
+        const totalAcum   = registros.reduce((a, g) => a + parseFloat(g.total || 0), 0);
+        const promedio    = registros.length > 0 ? totalAcum / registros.length : 0;
+        const fmt = (n) => n.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' });
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setConceptoTendencia(null)}>
+            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+            <div
+              className="relative w-full max-w-3xl bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl overflow-hidden animate-slide-up"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-start justify-between p-6 border-b border-gray-800">
+                <div>
+                  <p className="text-xs text-indigo-400 font-semibold uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                    <TrendingUp size={12} /> Tendencia de Concepto
+                  </p>
+                  <h2 className="text-base font-bold text-white leading-snug max-w-xl">{conceptoTendencia}</h2>
+                </div>
+                <button onClick={() => setConceptoTendencia(null)} className="text-gray-500 hover:text-white transition-colors p-1 shrink-0">
+                  <X size={22} />
+                </button>
+              </div>
+
+              {/* KPIs */}
+              <div className="grid grid-cols-3 gap-4 p-5 border-b border-gray-800">
+                <div className="bg-gray-800/60 rounded-xl p-4 text-center">
+                  <p className="text-xs text-gray-500 mb-1">Compras registradas</p>
+                  <p className="text-2xl font-bold text-white">{registros.length}</p>
+                </div>
+                <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-4 text-center">
+                  <p className="text-xs text-indigo-400/70 mb-1">Total Acumulado</p>
+                  <p className="text-sm font-bold text-indigo-400">{fmt(totalAcum)}</p>
+                </div>
+                <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4 text-center">
+                  <p className="text-xs text-purple-400/70 mb-1">Promedio / Compra</p>
+                  <p className="text-sm font-bold text-purple-400">{fmt(promedio)}</p>
+                </div>
+              </div>
+
+              {/* Gráfica */}
+              <div className="p-5">
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-4">Gasto mensual acumulado</p>
+                {porMes.length >= 1 ? (
+                  <div className="h-52">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={porMes} margin={{ top: 5, right: 20, left: 10, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="colorConceptoTend" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35}/>
+                            <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
+                        <XAxis dataKey="mes" stroke="#6b7280" tick={{ fill: '#9ca3af', fontSize: 11 }} axisLine={false} tickLine={false} />
+                        <YAxis stroke="#6b7280" tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => `$${(v/1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
+                        <Tooltip
+                          contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: '10px', color: '#f9fafb', fontSize: '12px' }}
+                          formatter={(v, n) => [fmt(v), n === 'total' ? 'Total' : 'Compras']}
+                          labelStyle={{ color: '#9ca3af', marginBottom: 4 }}
+                        />
+                        <Area type="monotone" dataKey="total" name="total" stroke="#6366f1" strokeWidth={2.5} fill="url(#colorConceptoTend)" activeDot={{ r: 5, fill: '#6366f1', stroke: '#312e81', strokeWidth: 2 }} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-sm text-center py-10">Solo hay un registro — no hay suficiente historial para graficar tendencia.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

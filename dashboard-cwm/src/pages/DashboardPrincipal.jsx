@@ -28,6 +28,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { io } from 'socket.io-client';
 import { SOCKET_URL } from '../api.js';
 import CashFlowChart from '../components/CashFlowChart.jsx';
+import VisorFactura from '../components/VisorFactura.jsx';
 
 export default function DashboardPrincipal({
   facturas,
@@ -60,6 +61,8 @@ export default function DashboardPrincipal({
   
   const [verificandoSAT, setVerificandoSAT] = useState({});
   const [aprobando, setAprobando] = useState({});
+  const [visorUuid, setVisorUuid] = useState(null);
+  const [proveedorPanel, setProveedorPanel] = useState(null);
 
   const handleToggleAprobacion = async (uuid) => {
     setAprobando(prev => ({...prev, [uuid]: true}));
@@ -278,6 +281,18 @@ export default function DashboardPrincipal({
   const copiarAlPortapapeles = (texto) => {
     navigator.clipboard.writeText(texto);
     toast(`UUID copiado: ${texto.substring(0, 20)}...`, 'success');
+  };
+
+  const copiarRutaCarpeta = (ruta) => {
+    let rutaWindows = ruta;
+    if (ruta.startsWith('/mnt/nas_pagos')) {
+      rutaWindows = ruta.replace('/mnt/nas_pagos', '\\\\192.168.1.15\\pagos');
+    } else if (ruta.startsWith('/mnt/nas_bancos')) {
+      rutaWindows = ruta.replace('/mnt/nas_bancos', '\\\\192.168.1.15\\BANCOS');
+    }
+    rutaWindows = rutaWindows.replace(/\//g, '\\');
+    navigator.clipboard.writeText(rutaWindows);
+    toast(`📋 Ruta copiada: ${rutaWindows}`, 'success');
   };
 
   const handleSubidaManual = async (event, uuid) => {
@@ -528,7 +543,13 @@ export default function DashboardPrincipal({
                     <td className="px-6 py-4 whitespace-nowrap">
                       {factura.folio_interno ? (
                         <div className="flex items-center gap-2 group">
-                          <span className="font-medium text-gray-300 group-hover:text-white transition-colors">{factura.folio_interno}</span>
+                          <button
+                            onClick={() => setVisorUuid(factura.uuid)}
+                            className="font-medium text-blue-400 hover:text-blue-300 hover:underline transition-colors text-left"
+                            title="Ver PDF de la factura"
+                          >
+                            {factura.folio_interno}
+                          </button>
                           <button onClick={() => copiarAlPortapapeles(factura.folio_interno)} className="text-gray-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-all" title="Copiar Folio al portapapeles">
                             <Copy size={14} />
                           </button>
@@ -552,8 +573,14 @@ export default function DashboardPrincipal({
                     </td>
                     
                     <td className="px-6 py-4">
-                      <div className="font-medium text-gray-300 flex items-center gap-2" title={factura.proveedor}>
-                        {obtenerNombreCorto(factura.proveedor)}
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setProveedorPanel({ rfc: factura.rfc, nombre: factura.proveedor })}
+                          className="font-medium text-gray-300 hover:text-white hover:underline transition-colors text-left"
+                          title={`Ver panel de ${factura.proveedor}`}
+                        >
+                          {obtenerNombreCorto(factura.proveedor)}
+                        </button>
                         {factura.tipo_comprobante?.toUpperCase() === 'I' && factura.metodo_pago === 'PPD' && factura.estatus === 'pagado' && !factura.tiene_complemento && (
                           <span title="Falta XML de Complemento de Pago (REP). Póliza de egreso bloqueada." className="cursor-help text-red-500 flex items-center bg-red-500/10 p-1 rounded">
                             <Lock size={12} />
@@ -591,15 +618,13 @@ export default function DashboardPrincipal({
                       {factura.estatus === 'pagado' ? (
                         <div className="flex items-center justify-center gap-1">
                           {factura.expediente && (
-                            <a 
-                              href={obtenerEnlaceLocal(factura.expediente)}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                            <button
+                              onClick={() => copiarRutaCarpeta(factura.expediente)}
                               className="inline-flex items-center justify-center p-2 text-gray-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
-                              title={factura.expediente}
+                              title={`Copiar ruta: ${factura.expediente}`}
                             >
                               <FolderOpen size={18} />
-                            </a>
+                            </button>
                           )}
                           <button
                             onClick={() => handleEliminarPago(factura.uuid)}
@@ -612,15 +637,13 @@ export default function DashboardPrincipal({
                       ) : (
                         <div className="flex items-center justify-center gap-1">
                           {factura.expediente ? (
-                            <a 
-                              href={obtenerEnlaceLocal(factura.expediente)}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                            <button
+                              onClick={() => copiarRutaCarpeta(factura.expediente)}
                               className="inline-flex items-center justify-center p-2 text-gray-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
-                              title={factura.expediente}
+                              title={`Copiar ruta: ${factura.expediente}`}
                             >
                               <FolderOpen size={18} />
-                            </a>
+                            </button>
                           ) : (
                             <span className="text-gray-700 inline-flex items-center justify-center p-2" title="Carpeta aún no generada">
                               <FolderOpen size={18} />
@@ -872,6 +895,101 @@ export default function DashboardPrincipal({
         </div>
       )}
 
+      {/* Visor PDF de Factura */}
+      {visorUuid && (
+        <VisorFactura
+          uuid={visorUuid}
+          token={token}
+          onClose={() => setVisorUuid(null)}
+        />
+      )}
+
+      {/* Panel lateral de Proveedor */}
+      {proveedorPanel && (() => {
+        const facsProv = facturas.filter(f => f.rfc === proveedorPanel.rfc);
+        const totalAcum = facsProv.reduce((a, f) => a + Number(f.total || 0), 0);
+        const totalPend = facsProv.filter(f => f.estatus === 'pendiente').reduce((a, f) => a + Number(f.total || 0), 0);
+        const totalPag  = facsProv.filter(f => f.estatus === 'pagado').reduce((a, f) => a + Number(f.total || 0), 0);
+        return (
+          <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setProveedorPanel(null)}>
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+            <div
+              className="relative w-full max-w-xl bg-gray-900 border-l border-gray-800 shadow-2xl flex flex-col overflow-hidden animate-slide-in-right"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header proveedor */}
+              <div className="flex items-start justify-between p-6 border-b border-gray-800 bg-gray-950/60 shrink-0">
+                <div>
+                  <h2 className="text-lg font-bold text-white leading-tight">{obtenerNombreCorto(proveedorPanel.nombre)}</h2>
+                  <p className="text-sm text-gray-500 font-mono mt-1">{proveedorPanel.rfc}</p>
+                </div>
+                <button onClick={() => setProveedorPanel(null)} className="text-gray-500 hover:text-white transition-colors p-1">
+                  <X size={22} />
+                </button>
+              </div>
+
+              {/* KPIs */}
+              <div className="grid grid-cols-3 gap-3 p-5 border-b border-gray-800 shrink-0">
+                <div className="bg-gray-800/60 rounded-xl p-3 text-center">
+                  <p className="text-xs text-gray-500 mb-1">Facturas</p>
+                  <p className="text-2xl font-bold text-white">{facsProv.length}</p>
+                </div>
+                <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-3 text-center">
+                  <p className="text-xs text-orange-400/70 mb-1">Pendiente</p>
+                  <p className="text-sm font-bold text-orange-400">{formatearMoneda(totalPend)}</p>
+                </div>
+                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-center">
+                  <p className="text-xs text-emerald-400/70 mb-1">Pagado</p>
+                  <p className="text-sm font-bold text-emerald-400">{formatearMoneda(totalPag)}</p>
+                </div>
+              </div>
+
+              {/* Tabla de facturas del proveedor */}
+              <div className="overflow-y-auto flex-1">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-gray-950/90 text-gray-500 text-xs border-b border-gray-800">
+                    <tr>
+                      <th className="px-4 py-3 text-left font-medium">Folio</th>
+                      <th className="px-4 py-3 text-left font-medium">Fecha</th>
+                      <th className="px-4 py-3 text-right font-medium">Total</th>
+                      <th className="px-4 py-3 text-center font-medium">Estatus</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {facsProv.map(f => (
+                      <tr key={f.uuid} className="hover:bg-gray-800/30 transition-colors">
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => { setProveedorPanel(null); setVisorUuid(f.uuid); }}
+                            className="text-blue-400 hover:text-blue-300 hover:underline font-medium text-left"
+                          >
+                            {f.folio_interno || (f.uuid?.substring(0, 8) + '...')}
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 text-gray-400">{f.fecha_emision}</td>
+                        <td className="px-4 py-3 text-right text-gray-200 font-semibold">{formatearMoneda(f.total)}</td>
+                        <td className="px-4 py-3 text-center">
+                          <span className={`text-[10px] px-2 py-1 rounded-md font-bold uppercase ${
+                            f.estatus === 'pagado' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-orange-500/10 text-orange-400'
+                          }`}>
+                            {f.estatus}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Footer total */}
+              <div className="p-5 border-t border-gray-800 bg-gray-950/50 flex justify-between items-center shrink-0">
+                <span className="text-sm text-gray-500">Total histórico acumulado</span>
+                <span className="text-xl font-bold text-white">{formatearMoneda(totalAcum)}</span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
